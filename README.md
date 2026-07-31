@@ -1,5 +1,6 @@
 # 藥品辨識王
 
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Click%20Here-blue?style=for-the-badge)](https://liangrxdev.github.io/TFDA-drug-id-quiz/)
 藥師外觀辨識自我測驗。以衛福部食藥署「藥品外觀資料集」出題，依實拍圖與外觀特徵辨識英文品名。
 
 - 每回合隨機 **20 題**，答案鍵不重複
