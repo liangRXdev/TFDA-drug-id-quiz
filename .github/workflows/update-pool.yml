@@ -21,6 +21,7 @@ on:
 
 permissions:
   contents: write
+  issues: write     # 失敗時開 issue 需要；少了這個通知機制本身會 403（覆審 C3）
 
 jobs:
   update:

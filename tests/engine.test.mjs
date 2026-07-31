@@ -332,6 +332,24 @@ describe('A7 — 題目狀態機（規格 6.4）', () => {
     assert.equal(q.mark, 1.0);
   });
 
+  // 覆審 C5 回歸：app.js 的 voidCurrent 依賴此契約——
+  // 已作答的題目不因事後的資源失敗而作廢，否則原題仍計分卻又遞補一題，分母會多算。
+  test('已鎖定後資源失敗不得轉為作廢（回歸）', () => {
+    for (const correct of [true, false]) {
+      const locked = transition(q0(), { type: 'submit', correct });
+      const after = transition(locked, { type: 'fail' });
+      assert.equal(after.state, QState.LOCKED, 'LOCKED 是終態，fail 不得改變它');
+      assert.deepEqual(after, locked);
+    }
+  });
+
+  test('已提示但未作答時資源失敗仍可作廢', () => {
+    const hinted = transition(q0(), { type: 'hint' });
+    const after = transition(hinted, { type: 'fail' });
+    assert.equal(after.state, QState.VOID);
+    assert.equal(after.mark, 0);
+  });
+
   test('資源失敗 → 作廢，且作廢為終態', () => {
     let q = transition(q0(), { type: 'fail' });
     assert.equal(q.state, QState.VOID);

@@ -115,11 +115,17 @@ function renderQuestion() {
   $('qBar').style.width = `${(state.idx / QUIZ_SIZE) * 100}%`;
   $('qScore').textContent = scoreQuiz(state.questions.slice(0, state.idx)).earned.toFixed(1);
 
-  // 圖片載入失敗 → 該題作廢並遞補（規格 6.5），絕不計為答錯
+  // 圖片載入失敗 → 該題作廢並遞補（規格 6.5），絕不計為答錯。
+  // onerror 必須綁定「哪一題、哪個 src」：換題後舊圖片的延遲錯誤會作廢無辜的新題（覆審 C5）
   const img = $('qImg');
-  img.onerror = () => voidCurrent('圖片載入失敗');
+  const myIdx = state.idx;
+  const expected = DATA_DIR + it.img;
+  img.onerror = () => {
+    if (state.idx !== myIdx || img.getAttribute('src') !== expected) return;  // 過期事件
+    voidCurrent('圖片載入失敗');
+  };
   img.alt = `藥品外觀實拍圖：${it.shape.join('／')}、${it.color.join('／')}`;
-  img.src = DATA_DIR + it.img;
+  img.src = expected;
 
   $('qFeatures').innerHTML =
     featureCell('形狀', it.shape.join('／'))
@@ -143,8 +149,14 @@ function renderQuestion() {
 /** 資源失敗：作廢並自題庫遞補一題（不計分、不計入分母） */
 function voidCurrent(reason) {
   const q = state.questions[state.idx];
-  if (q.state === QState.VOID) return;
-  state.questions[state.idx] = transition(q, { type: 'fail' });
+  const next = transition(q, { type: 'fail' });
+
+  // 必須確認真的進入 VOID 才能往下走（覆審 C5）。
+  // LOCKED 是終態，transition 會原樣回傳——若此時仍 voided++ 並遞補一題，
+  // 原題會照常計分、考卷卻多一題，分母變成 21。
+  if (next.state !== QState.VOID) return;
+
+  state.questions[state.idx] = next;
   state.voided++;
 
   if (state.voided > MAX_VOID) {
