@@ -1,0 +1,16 @@
+{
+  "name": "tfda-drug-id-quiz",
+  "version": "1.0.0",
+  "description": "藥品辨識王 — 藥師外觀辨識自我測驗（純靜態，零建置）",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test \"tests/**/*.test.mjs\"",
+    "build:pool": "node tools/build-pool.mjs",
+    "fetch:images": "uv run --with pillow --with requests tools/fetch-images.py",
+    "verify": "node tools/verify-data.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

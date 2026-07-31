@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="藥品辨識王">
+  <rect width="512" height="512" rx="96" fill="#F5F0E8"/>
+  <circle cx="256" cy="212" r="96" fill="#fff" stroke="#3D7A8A" stroke-width="18"/>
+  <path d="M256 116v192" stroke="#3D7A8A" stroke-width="18" stroke-linecap="round"/>
+  <path d="M150 372h212" stroke="#E0D9CE" stroke-width="14" stroke-linecap="round"/>
+  <g fill="#3D7A8A">
+    <rect x="150" y="392" width="6" height="26" rx="3"/>
+    <rect x="190" y="392" width="6" height="18" rx="3"/>
+    <rect x="230" y="392" width="6" height="26" rx="3"/>
+    <rect x="270" y="392" width="6" height="18" rx="3"/>
+    <rect x="310" y="392" width="6" height="26" rx="3"/>
+    <rect x="350" y="392" width="6" height="18" rx="3"/>
+  </g>
+</svg>

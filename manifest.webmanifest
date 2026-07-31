@@ -1,0 +1,15 @@
+{
+  "name": "藥品辨識王 — 藥師外觀辨識自我測驗",
+  "short_name": "藥品辨識王",
+  "description": "依食藥署藥品外觀資料集出題，藥師依實拍圖與外觀特徵辨識英文品名。每回合 20 題並可下載成績卡。",
+  "lang": "zh-TW",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F5F0E8",
+  "theme_color": "#3D7A8A",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

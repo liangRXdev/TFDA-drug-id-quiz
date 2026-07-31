@@ -1,0 +1,123 @@
+name: 更新題庫
+
+# 規格 2-8：排程與手動觸發不得並行，否則兩個 job 會從不同基線各自發布
+concurrency:
+  group: pool-update
+  cancel-in-progress: false
+
+on:
+  schedule:
+    - cron: '0 20 1 * *'      # 每月 1 日 04:00 (Asia/Taipei)
+  workflow_dispatch:
+    inputs:
+      allow_any_delta:
+        description: '略過 ±3% 變動門檻（確認過差異才勾）'
+        type: boolean
+        default: false
+      verify_all:
+        description: '重抓全部圖片並比對雜湊（偵測原地換圖，每季一次）'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330        # 低於 Actions 單 job 6 小時上限
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: astral-sh/setup-uv@v5
+
+      # ── 建置題庫 ────────────────────────────────────────────────
+      # 任一驗證失敗即 exit 1，data/ 不變（規格 D9 全有全無、B1）
+      - name: 建置題庫
+        run: |
+          node tools/build-pool.mjs \
+            ${{ inputs.allow_any_delta && '--allow-any-delta' || '' }}
+
+      # ── 鏡像圖片 ────────────────────────────────────────────────
+      # 暫時性下載失敗重試 3 次後仍失敗 → 整批中止，不得用刪題吸收（規格 B8）
+      - name: 鏡像圖片
+        run: |
+          uv run tools/fetch-images.py --workers 12 \
+            ${{ inputs.verify_all && '--verify-all' || '' }}
+
+      # ── 驗收 ────────────────────────────────────────────────────
+      # A 組（engine）與 B 組（資料完整性）都必須綠燈才允許發布
+      - name: 單元測試
+        run: node --test "tests/**/*.test.mjs"
+
+      - name: 資料完整性驗證
+        run: node tools/verify-data.mjs
+
+      # ── 發布 ────────────────────────────────────────────────────
+      - name: 提交變更
+        run: |
+          if git diff --quiet -- data/; then
+            echo "題庫無變更，不提交"
+            exit 0
+          fi
+          COUNT=$(node -e "console.log(require('./data/pool.json').meta.count)")
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git commit -m "chore(data): 更新題庫至 ${COUNT} 題
+
+          由 update-pool workflow 自動產生。"
+          git push
+
+      - name: 摘要
+        if: always()
+        run: |
+          {
+            echo "### 題庫更新"
+            if [ -f data/pool.json ]; then
+              node -e '
+                const m = require("./data/pool.json").meta;
+                console.log("| 項目 | 值 |\n|---|---|");
+                console.log(`| 題數 | ${m.count} |`);
+                console.log(`| 來源筆數 | ${m.source_rows} |`);
+                console.log(`| 資料檔 | \`${m.source_file}\` |`);
+                console.log(`| 內容雜湊 | \`${m.content_hash.slice(0, 23)}…\` |`);
+                console.log(`| 停用容錯鍵數 | ${(m.no_fuzzy || []).length} |`);
+                for (const [k, v] of Object.entries(m.stages || {})) console.log(`| ${k} | ${v} |`);
+              '
+            else
+              echo '⚠️ 未產出 pool.json'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 變動幅度超標時 build-pool 會 exit 1；開 issue 交人工裁決（規格 D9／4-2）
+      - name: 失敗時開 issue
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `題庫自動更新失敗（${new Date().toISOString().slice(0, 10)}）`,
+              labels: ['data-pipeline'],
+              body: [
+                '排程更新未通過驗證，**題庫維持上一成功版本**（規格 D9 全有全無）。',
+                '',
+                `執行記錄：${url}`,
+                '',
+                '常見原因與處置：',
+                '- **變動幅度超出 ±3% 或移除 >50 題** — 確認來源真的有大量異動後，',
+                '  手動以 `allow_any_delta` 重跑。',
+                '- **圖片下載失敗** — 多為 TFDA 端暫時性問題，直接重跑即可。',
+                '- **來源非 200 / 非合法 ZIP** — 對方服務異常或 WAF 阻擋，擇日重試。',
+                '- **A4 誤接受不為 0** — 新藥名與既有藥名僅差 1 字元，',
+                '  確認 `no_fuzzy` 清單已涵蓋。',
+              ].join('\n'),
+            });
