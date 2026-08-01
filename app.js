@@ -609,7 +609,7 @@ function finish() {
     <div class="metric key">
       <div class="name">總分</div>
       <div class="val">${r.score.toFixed(1)}</div>
-      <div class="interp ${level3[0]}">${level3[1]}（${cfg.name}級標準）</div>
+      <div class="interp ${level3[0]}">${level3[1]}（${cfg.badge}標準）</div>
     </div>
     <div class="metric"><div class="name">亂猜基線</div><div class="val">${r.chance.toFixed(1)}</div>
       <div class="interp ${net > 0 ? 'good' : 'warn'}">淨 ${net >= 0 ? '+' : ''}${net.toFixed(1)}</div></div>
