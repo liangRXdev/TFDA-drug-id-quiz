@@ -3,7 +3,7 @@
  *
  *   node --test
  *
- * 本檔只涵蓋 L1 與共用基礎建設。L2 專屬（A9／A19）待 L2 實作時補。
+ * 涵蓋 L1、L2 與共用基礎建設。
  * 每條測試上方標註它要堵死的「弱化實作」——那是這些斷言存在的理由。
  */
 import { test, describe } from 'node:test';
@@ -18,6 +18,7 @@ import {
   HINTED_MARK, FULL_MARK,
   Level, CHOICE_COUNT, DISTRACTOR_COUNT, CHANCE, MAX_QUIZ_ATTEMPTS,
   nameCollides, buildIndex, eligibleKeys, buildChoices, drawLeveledQuiz, judgeChoice,
+  l2Key, strictlyEligibleL2, pickEliminated, replaceOption,
 } from '../engine.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -580,5 +581,186 @@ describe('級別常數', () => {
 
   test('三個級別代號存在', () => {
     assert.deepEqual(Object.keys(Level).sort(), ['L1', 'L2', 'L3']);
+  });
+});
+
+// ══ A9 — 全題庫掃描 L2 ════════════════════════════════════════════════
+// 〔堵〕嚴格階段整個壞掉、全靠放寬階段湊到門檻 → L2 靜默退化成 L1；
+//       只要 L2key 形式上不同就算過，而形狀其實已經放寬。
+describe('A9 全題庫掃描 L2', () => {
+  test('嚴格階段可用答案鍵不得低於基準（F7 = 2902）', () => {
+    need();
+    let strict = 0;
+    for (const [, recs] of index().byAns) {
+      if (recs.every((r) => strictlyEligibleL2(r, index()))) strict++;
+    }
+    assert.ok(strict >= 2850,
+      `L2 嚴格階段（同形同色）可用答案鍵 ${strict}，低於回歸基準 2850`);
+  });
+
+  test('放寬階段只能增加，不能取代嚴格階段', () => {
+    need();
+    let strict = 0;
+    for (const [, recs] of index().byAns) {
+      if (recs.every((r) => strictlyEligibleL2(r, index()))) strict++;
+    }
+    const all = eligibleKeys(index(), Level.L2).size;
+    assert.ok(all >= strict, '含放寬的可用集合不得小於嚴格集合');
+    assert.ok(all - strict < strict * 0.2,
+      `放寬階段補了 ${all - strict} 個，佔比過高 → 嚴格階段可能已失效`);
+  });
+
+  test('每個可用答案鍵的每一筆紀錄都能組題，且滿足 L2 全部條件', () => {
+    need();
+    const rng = makeRng(4242);
+    const eligible = eligibleKeys(index(), Level.L2);
+    let n = 0;
+    for (const it of ITEMS) {
+      if (!eligible.has(it.ans)) continue;
+      const c = buildChoices(it, index(), { level: Level.L2, rng, excludeAns: new Set() });
+      assertChoiceInvariants(c, it, Level.L2);
+
+      const all = [...c.options, ...c.spares];
+      // 形狀完全相同——永不放寬
+      for (const o of all) {
+        assert.deepEqual(o.shape, it.shape, `${o.ans} 形狀與正解不同（形狀永不放寬）`);
+        // 顏色：嚴格相同，或（放寬階段）至少相交
+        const same = o.color.join('|') === it.color.join('|');
+        assert.ok(same || o.color.some((x) => it.color.includes(x)),
+          `${o.ans} 顏色與正解毫無交集`);
+      }
+      // L2key 兩兩相異（含備援）
+      const keys = all.map(l2Key);
+      assert.equal(new Set(keys).size, keys.length, `L2key 重複：${it.ans}`);
+      n++;
+    }
+    assert.ok(n > 3000, `掃描筆數 ${n} 過少`);
+  });
+
+  test('L2 的 spares 恰為 2 個', () => {
+    need();
+    const rng = makeRng(77);
+    const eligible = eligibleKeys(index(), Level.L2);
+    for (const it of ITEMS.filter((i) => eligible.has(i.ans)).filter((_, i) => i % 97 === 0)) {
+      const c = buildChoices(it, index(), { level: Level.L2, rng, excludeAns: new Set() });
+      assert.equal(c.spares.length, 2);
+    }
+  });
+});
+
+// ══ A19 — 備援結構性合法 ══════════════════════════════════════════════
+// 〔堵〕正式 3 個合法，換入備援後產生重複 ans 或 L2key 碰撞。
+describe('A19 備援', () => {
+  test('任取 3 個誘答的所有組合皆合法（結構性保證）', () => {
+    need();
+    const rng = makeRng(31337);
+    const eligible = eligibleKeys(index(), Level.L2);
+    const sample = ITEMS.filter((i) => eligible.has(i.ans)).filter((_, i) => i % 149 === 0);
+    assert.ok(sample.length > 10);
+
+    for (const it of sample) {
+      const c = buildChoices(it, index(), { level: Level.L2, rng, excludeAns: new Set() });
+      const d = [...c.options.filter((o) => o !== it), ...c.spares];
+      assert.equal(d.length, 5, '誘答總數應為 5');
+
+      // 窮舉 C(5,3) = 10 種組合
+      let combos = 0;
+      for (let a = 0; a < 5; a++) for (let b = a + 1; b < 5; b++) for (let e = b + 1; e < 5; e++) {
+        const set = [it, d[a], d[b], d[e]];
+        assert.equal(new Set(set.map((x) => x.ans)).size, 4, 'H1 答案鍵重複');
+        assert.equal(new Set(set.map(l2Key)).size, 4, 'L2key 碰撞');
+        for (let i = 0; i < 4; i++) for (let j = i + 1; j < 4; j++) {
+          assert.ok(!nameCollides(set[i].ans, set[j].ans), 'H3 名稱碰撞');
+        }
+        combos++;
+      }
+      assert.equal(combos, 10);
+    }
+  });
+
+  test('replaceOption：格位不變、身分同步、備援只消耗一次', () => {
+    need();
+    const qs = drawLeveledQuiz(ITEMS, { level: Level.L2, rng: makeRng(808), index: index() });
+    const q = qs.find((x) => x.answerIdx !== 0) ?? qs[0];
+    const slot = q.answerIdx === 0 ? 1 : 0;
+    const before = q.options[slot];
+
+    const r1 = replaceOption(q, slot);
+    assert.ok(r1, '第一次替換應成功');
+    assert.equal(r1.spares.length, 1, '備援應被消耗一個');
+    assert.notEqual(r1.options[slot].id, before.id, '該格身分應已更換');
+    assert.equal(r1.options[r1.answerIdx].id, q.item.id, '正解格不得受影響');
+    assert.equal(r1.options.length, 4);
+    assert.equal(new Set(r1.options.map((o) => o.ans)).size, 4, '替換後仍須答案鍵互異');
+    assert.equal(new Set(r1.options.map(l2Key)).size, 4, '替換後仍須 L2key 相異');
+    assert.equal(q.spares.length, 2, '原題目物件不得被就地改動');
+
+    const r2 = replaceOption(r1, slot);
+    assert.ok(r2, '第二次替換應成功');
+    assert.equal(r2.spares.length, 0);
+    assert.equal(replaceOption(r2, slot), null, '備援耗盡後必須回傳 null（呼叫端作廢）');
+  });
+
+  test('replaceOption 拒絕：正解格、已排除格、越界', () => {
+    need();
+    const qs = drawLeveledQuiz(ITEMS, { level: Level.L2, rng: makeRng(909), index: index() });
+    const q = qs[0];
+    assert.equal(replaceOption(q, q.answerIdx), null, '正解格不可替換，只能作廢');
+    const slot = q.answerIdx === 0 ? 1 : 0;
+    assert.equal(replaceOption({ ...q, eliminated: slot }, slot), null, '已排除格不參與替換');
+    for (const bad of [-1, 4, 1.5, '1', null, undefined, NaN]) {
+      assert.equal(replaceOption(q, bad), null, `越界/非整數 ${String(bad)} 應回傳 null`);
+    }
+  });
+});
+
+// ══ A15 — L2 提示 ═════════════════════════════════════════════════════
+// 〔堵〕每次呼叫回傳不同格，字面條文仍通過，UI 會累積多個排除格。
+describe('A15 L2 提示', () => {
+  test('pickEliminated 絕不回傳正解格', () => {
+    need();
+    const qs = drawLeveledQuiz(ITEMS, { level: Level.L2, rng: makeRng(1212), index: index() });
+    const rng = makeRng(55);
+    for (const q of qs) {
+      for (let i = 0; i < 40; i++) {
+        const e = pickEliminated(q, rng);
+        assert.notEqual(e, q.answerIdx, '排除格不得是正解');
+        assert.ok(Number.isInteger(e) && e >= 0 && e < 4);
+      }
+    }
+  });
+
+  test('已排除的格不會被再次選中', () => {
+    need();
+    const qs = drawLeveledQuiz(ITEMS, { level: Level.L2, rng: makeRng(1313), index: index() });
+    const q = qs[0];
+    const first = pickEliminated(q, makeRng(3));
+    const q2 = { ...q, eliminated: first };
+    for (let i = 0; i < 30; i++) {
+      assert.notEqual(pickEliminated(q2, makeRng(i)), first);
+    }
+  });
+
+  test('提示只降一次分且只排除一格（狀態機）', () => {
+    need();
+    const qs = drawLeveledQuiz(ITEMS, { level: Level.L2, rng: makeRng(1414), index: index() });
+    let q = qs[0];
+    assert.equal(q.chance, CHANCE.FOUR);
+
+    q = { ...transition(q, { type: 'hint' }), eliminated: pickEliminated(q, makeRng(1)) };
+    assert.equal(q.mark, HINTED_MARK);
+    assert.equal(Math.round(q.chance * 10000) / 10000, 0.1667);
+    const firstElim = q.eliminated;
+
+    // 重複取提示：狀態機忽略事件，排除格與扣分皆不變
+    const again = transition(q, { type: 'hint' });
+    assert.equal(again.mark, HINTED_MARK);
+    assert.equal(again.eliminated, firstElim, '重複提示不得產生第二個排除格');
+    assert.equal(again.chance, q.chance);
+
+    // 鎖定後取提示無效
+    const locked = transition(q, { type: 'submit', correct: false });
+    assert.equal(transition(locked, { type: 'hint' }).mark, HINTED_MARK);
+    assert.equal(transition(locked, { type: 'hint' }).state, QState.LOCKED);
   });
 });

@@ -10,7 +10,9 @@
 import {
   normalize, squash, judge, makeHint, QUIZ_SIZE,
   QState, transition, newQuestion, scoreQuiz, HINTED_MARK,
-  Level, CHANCE, buildIndex, eligibleKeys, buildChoices, drawLeveledQuiz, judgeChoice,
+  Level, CHANCE, CHOICE_COUNT, L2_LOAD_TIMEOUT_MS,
+  buildIndex, eligibleKeys, buildChoices, drawLeveledQuiz, judgeChoice,
+  pickEliminated, replaceOption,
 } from './engine.js';
 
 const SCHEMA = 1;
@@ -26,17 +28,22 @@ const DATA_DIR = 'data/';
  */
 const LEVELS = {
   [Level.L1]: {
-    name: '簡單', desc: '看圖，從四個藥名選一個',
+    name: '簡單', badge: '簡單級', desc: '看圖，從四個藥名選一個',
     meta: '亂猜基線 25 ｜ 無提示', choice: true, hint: false,
     pass: 90, fair: 65,
   },
+  [Level.L2]: {
+    name: '中級', badge: '中級', desc: '給藥名，從四張圖選一張',
+    meta: '亂猜基線 25 ｜ 可刪去一個錯項', choice: true, hint: true, grid: true,
+    pass: 85, fair: 55,
+  },
   [Level.L3]: {
-    name: '困難', desc: '看圖，直接輸入英文品名',
+    name: '困難', badge: '困難級', desc: '看圖，直接輸入英文品名',
     meta: '亂猜基線 0 ｜ 可用提示', choice: false, hint: true,
     pass: 80, fair: 50,
   },
 };
-const LEVEL_ORDER = [Level.L1, Level.L3];
+const LEVEL_ORDER = [Level.L1, Level.L2, Level.L3];
 
 const $ = (id) => document.getElementById(id);
 const show = (el, on = true) => el.classList.toggle('hidden', !on);
@@ -53,6 +60,8 @@ const state = {
   voided: 0,
   used: new Set(),           // 本回合已用過的答案鍵，遞補時避免重複
   nextToken: 1,              // 題目 token，遞補不重用（規格 D18）
+  gridLoaded: new Set(),     // L2 已成功載入的格（ready-gate，規格 D21）
+  timers: [],                // L2 各格的載入逾時，換題時必須全部清掉
 };
 
 // ── 載入題庫（失敗路徑見規格 C4）──────────────────────────────────────
@@ -174,11 +183,12 @@ function startQuiz() {
 
   try {
     state.questions = drawLeveledQuiz(state.pool.items, {
-      level, n: QUIZ_SIZE, rng: Math.random, index: state.index,
+      level, n: QUIZ_SIZE, rng: Math.random,
+      index: state.index, eligible: eligibleFor(level),
     });
   } catch (e) {
     if (e.code === 'INSUFFICIENT_KEYS') {
-      return fatal(`${LEVELS[level].name}級可用答案鍵僅 ${e.available} 個，`
+      return fatal(`${LEVELS[level].badge}可用答案鍵僅 ${e.available} 個，`
         + `不足 ${e.required ?? QUIZ_SIZE} 個，無法出 ${QUIZ_SIZE} 題。`);
     }
     if (e.code === 'QUIZ_ASSEMBLY_FAILED') {
@@ -210,12 +220,34 @@ const OPT_KEYS = ['A', 'B', 'C', 'D'];
 
 function renderQuestion() {
   const q = state.questions[state.idx];
-  const it = q.item;
   const cfg = LEVELS[q.level ?? Level.L3];
 
+  clearTimers();
   $('qIdx').textContent = state.idx + 1;
   $('qBar').style.width = `${(state.idx / QUIZ_SIZE) * 100}%`;
   $('qScore').textContent = scoreQuiz(state.questions.slice(0, state.idx)).earned.toFixed(1);
+
+  show($('qHint'), false);
+  show($('qVerdict'), false);
+  show($('btnNext'), false);
+  show($('choiceActions'), false);
+
+  if (cfg.grid) renderGrid(q);
+  else {
+    renderPhoto(q);
+    if (cfg.choice) renderChoices(q);
+    else renderInput(cfg);
+  }
+}
+
+/** L1／L3：單張大圖 + 外觀特徵格 */
+function renderPhoto(q) {
+  const it = q.item;
+  show($('qPrompt'), false);
+  show($('qGrid'), false);
+  show($('qGridNote'), false);
+  show($('qImgWrap'));
+  show($('qFeatures'));
 
   // 圖片載入失敗 → 該題作廢並遞補（規格 6.5），絕不計為答錯。
   // onerror 必須綁定「哪一題、哪個 src」：換題後舊圖片的延遲錯誤會作廢無辜的新題（覆審 C5）。
@@ -238,13 +270,6 @@ function renderQuestion() {
     + featureCell('外觀尺寸', it.size ? `${it.size} mm` : '—')
     + featureCell('標記一', it.mark1)
     + (it.mark2 ? featureCell('標記二', it.mark2) : '');
-
-  show($('qHint'), false);
-  show($('qVerdict'), false);
-  show($('btnNext'), false);
-
-  if (cfg.choice) renderChoices(q);
-  else renderInput(cfg);
 }
 
 function renderChoices(q) {
@@ -272,6 +297,144 @@ function renderInput(cfg) {
   input.focus();
 }
 
+// ── L2：四張圖擇一 ───────────────────────────────────────────────────
+
+const gridCells = () => $('qGrid').querySelectorAll('.cell');
+const clearTimers = () => { state.timers.forEach(clearTimeout); state.timers = []; };
+
+/**
+ * L2 題目版面。**不顯示任何外觀特徵**——形狀／顏色／刻痕／標記
+ * 只要出現任何一項（含 alt 與 aria），使用者不看圖就能對答案，該級歸零（規格 §6.2）。
+ */
+function renderGrid(q) {
+  show($('qImgWrap'), false);
+  show($('qFeatures'), false);
+  show($('qOptions'), false);
+  show($('inputMode'), false);
+  show($('qPrompt'));
+  show($('qGrid'));
+  show($('qGridNote'));
+  show($('choiceActions'));
+
+  $('qPrompt').innerHTML =
+    `<div class="name">${escapeHtml(q.item.full)}</div>`
+    + (q.item.zh ? `<div class="zh">${escapeHtml(q.item.zh)}</div>` : '')
+    + '<div class="ask">這個藥是哪一張？</div>';
+
+  // alt 只能是中性描述——現行 L1/L3 的 alt 寫著「圓形／白」，
+  // 直接沿用會把答案寫進可及性樹裡送分
+  $('qGrid').innerHTML = q.options.map((_, k) =>
+    `<button class="cell" data-k="${k}" disabled>
+       <span class="key">${OPT_KEYS[k]}</span>
+       <img alt="選項 ${OPT_KEYS[k]} 藥品外觀">
+     </button>`).join('');
+  gridCells().forEach((el) => {
+    el.addEventListener('click', () => submitChoice(Number(el.dataset.k)));
+  });
+
+  state.gridLoaded = new Set();
+  for (let k = 0; k < CHOICE_COUNT; k++) loadCell(k);
+  updateGate();
+}
+
+/**
+ * 載入單一格。
+ *
+ * 生效條件是三段身分全等：**題目 token、格位 k、該格目前的資產 id**（規格 I5）。
+ * 只比對題號會被遞補的位移騙過；只比對格位會被「同格換過備援」的舊請求騙過——
+ * 那是真實瀏覽器最常見的路徑（同一個 <img> 改 src 後舊請求才回報）。
+ */
+function loadCell(k) {
+  const q = state.questions[state.idx];
+  const cell = gridCells()[k];
+  if (!cell) return;
+  const img = cell.querySelector('img');
+  const item = q.options[k];
+  const token = q.token;
+  const assetId = item.id;
+  const src = DATA_DIR + item.img;
+
+  let settled = false;
+  const stale = () => {
+    const cur = state.questions[state.idx];
+    return !cur || cur.token !== token || cur.options[k]?.id !== assetId
+      || img.getAttribute('src') !== src;
+  };
+  const settle = (ok) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    if (stale()) return;                       // 遲到事件，一律忽略
+    if (ok) {
+      state.gridLoaded.add(k);
+      updateGate();
+    } else {
+      failCell(token, k, assetId);
+    }
+  };
+
+  // 沒有逾時，一張永久 pending 的圖會鎖死整題（ready-gate 的直接後果，規格 D21）
+  const timer = setTimeout(() => settle(false), L2_LOAD_TIMEOUT_MS);
+  state.timers.push(timer);
+
+  img.onload = () => settle((img.naturalWidth ?? 1) > 0);   // 零尺寸視同失敗
+  img.onerror = () => settle(false);
+  img.setAttribute('src', src);
+  img.src = src;
+}
+
+/** 資源失敗：正解格作廢，誘答格換備援（規格 D15） */
+function failCell(token, k, assetId) {
+  const q = state.questions[state.idx];
+  if (!q || q.token !== token || q.options[k]?.id !== assetId) return;
+  // 題目已鎖定後的資源事件一律忽略，不得回溯改變結果（規格 D21）
+  if (q.state === QState.LOCKED || q.state === QState.VOID) return;
+  if (k === q.answerIdx) return voidCurrent('正解圖片載入失敗');
+
+  const replaced = replaceOption(q, k);
+  if (!replaced) return voidCurrent('誘答圖片載入失敗且備援已耗盡');
+
+  state.questions[state.idx] = replaced;
+  state.gridLoaded.delete(k);
+  updateGate();
+  loadCell(k);                                  // 只重載該格，格位不變
+}
+
+/** ready-gate：四格全部載入完成前不得作答、不得取提示（規格 D21） */
+function updateGate() {
+  const q = state.questions[state.idx];
+  if (!q || !LEVELS[q.level]?.grid) return;
+  const ready = state.gridLoaded.size === CHOICE_COUNT;
+  const open = ready && (q.state === QState.PENDING || q.state === QState.HINTED);
+
+  gridCells().forEach((el, k) => {
+    el.disabled = !open || q.eliminated === k;
+  });
+  $('btnHintChoice').disabled = !ready || q.state !== QState.PENDING;
+  $('qGridNote').textContent = ready
+    ? '看不清楚刻字時可用兩指縮放。'
+    : `圖片載入中…（${state.gridLoaded.size}/${CHOICE_COUNT}）`;
+}
+
+/** L2 提示：刪去一個誘答（規格 D16） */
+function hintChoice() {
+  const q = state.questions[state.idx];
+  if (q.state !== QState.PENDING) return;                 // 已提示或已鎖定即忽略
+  if (state.gridLoaded.size !== CHOICE_COUNT) return;     // 未 ready 不可取提示
+
+  const elim = pickEliminated(q, Math.random);
+  if (elim < 0) return;
+  state.questions[state.idx] = { ...transition(q, { type: 'hint' }), eliminated: elim };
+
+  const cells = gridCells();
+  cells[elim].classList.add('gone');
+  $('qHint').innerHTML =
+    `已刪去選項 ${OPT_KEYS[elim]}`
+    + '<div class="meta">本題滿分降為 0.5，亂猜基線同步降為 16.7</div>';
+  show($('qHint'));
+  updateGate();
+}
+
 /** 資源失敗：作廢並自題庫遞補一題（不計分、不計入分母） */
 function voidCurrent(reason) {
   const q = state.questions[state.idx];
@@ -282,6 +445,7 @@ function voidCurrent(reason) {
   // 原題會照常計分、考卷卻多一題，分母變成 21。
   if (next.state !== QState.VOID) return;
 
+  clearTimers();
   state.questions[state.idx] = next;
   state.voided++;
 
@@ -315,7 +479,7 @@ function drawSpare(level) {
       const excludeAns = new Set(state.used);
       excludeAns.add(it.ans);
       return newQuestion(it, {
-        token, level, chance: CHANCE.FOUR,
+        token, level, chance: CHANCE.FOUR,   // 選擇題遞補仍是四選一
         ...buildChoices(it, state.index, { level, rng: Math.random, excludeAns }),
       });
     } catch (e) {
@@ -351,19 +515,31 @@ function lockAndReveal(locked, correct, extraNote = '') {
 function submitChoice(k) {
   const q = state.questions[state.idx];
   if (q.state === QState.LOCKED || q.state === QState.VOID) return;
+  if (q.eliminated === k) return;                       // 已排除的格不接受作答
+  const grid = !!LEVELS[q.level]?.grid;
+  if (grid && state.gridLoaded.size !== CHOICE_COUNT) return;   // 未 ready 不接受作答
 
   const correct = judgeChoice(k, q.answerIdx);
   // picked 是作答狀態而非狀態機事件，在 transition 之外組合進去（規格 §5.2）
   state.questions[state.idx] = { ...transition(q, { type: 'submit', correct }), picked: k };
   const locked = state.questions[state.idx];
 
-  $('qOptions').querySelectorAll('.opt').forEach((el) => {
-    const kk = Number(el.dataset.k);
+  const cells = grid ? gridCells() : $('qOptions').querySelectorAll('.opt');
+  cells.forEach((el, i) => {
+    const kk = Number(el.dataset.k ?? i);
     el.disabled = true;
     if (kk === q.answerIdx) el.classList.add('ok');
     else if (kk === k) el.classList.add('no');
-    else el.classList.add('dim');
+    else if (!grid) el.classList.add('dim');
+    // L2 鎖定後把品名補到每一格——「名字 ↔ 長相」的補完正是該級的學習點
+    if (grid) {
+      const nm = document.createElement('span');
+      nm.className = 'nm';
+      nm.textContent = q.options[kk].ans;
+      el.appendChild(nm);
+    }
   });
+  $('btnHintChoice').disabled = true;
 
   lockAndReveal(locked, correct);
 }
@@ -404,6 +580,7 @@ function hint() {
 }
 
 function next() {
+  clearTimers();
   state.idx++;
   if (state.idx >= state.questions.length) finish();
   else renderQuestion();
@@ -417,7 +594,7 @@ function finish() {
   show($('quiz'), false);
   show($('result'));
 
-  $('resultBadge').textContent = `${cfg.name}級`;
+  $('resultBadge').textContent = cfg.badge;
   $('resultSub').textContent =
     `計分 ${r.counted} 題　·　答對 ${r.correct} 題　·　用提示 ${r.hints} 題`
     + (r.voided ? `　·　作廢 ${r.voided} 題（不計入分母）` : '');
@@ -499,7 +676,7 @@ async function downloadCard() {
   const titleW = g.measureText(title).width;   // 必須在標題字型下量測
 
   // 級別徽章。成績卡是離開頁面後唯一的上下文，漏印級別會讓分數被誤讀（規格 D14）
-  const badge = `${cfg.name}級`;
+  const badge = cfg.badge;
   g.font = sans(700, 13);
   const bx = 52 + titleW + 14;
   const bw = g.measureText(badge).width + 20;
@@ -571,7 +748,7 @@ async function downloadCard() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `藥品辨識王_${cfg.name}級_${r.score.toFixed(0)}分_${new Date().toISOString().slice(0, 10)}.png`;
+  a.download = `藥品辨識王_${cfg.badge}_${r.score.toFixed(0)}分_${new Date().toISOString().slice(0, 10)}.png`;
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -612,6 +789,7 @@ $('btnStart').addEventListener('click', startQuiz);
 $('btnAgain').addEventListener('click', backToStart);
 $('btnSubmit').addEventListener('click', submit);
 $('btnHint').addEventListener('click', hint);
+$('btnHintChoice').addEventListener('click', hintChoice);
 $('btnNext').addEventListener('click', next);
 $('btnDownload').addEventListener('click', () => {
   downloadCard().catch((e) => {

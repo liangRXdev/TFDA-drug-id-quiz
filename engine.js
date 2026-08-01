@@ -299,6 +299,20 @@ export const CHOICE_COUNT = 4;
 /** L2 需 3 正式 + 2 備援；L1 只要 3（spares 恆空，規格 D15） */
 export const DISTRACTOR_COUNT = 5;
 export const MAX_QUIZ_ATTEMPTS = 3;
+/**
+ * L2 單格圖片的載入逾時（規格 D21）。
+ *
+ * 這條存在的唯一理由是 ready-gate：一旦規定「四格全部載入完才可作答」，
+ * 一張永久 pending 的圖就會鎖死整題，而且不會觸發 onerror。
+ * L1／L3 沒有 gate，不需要也不加逾時。
+ */
+export const L2_LOAD_TIMEOUT_MS = 8000;
+/**
+ * 貪婪挑選的重試次數。挑 k 個「兩兩合法」的元素對順序敏感，
+ * 換一個順序常常就成功——重試幾次比實作精確的團搜尋划算得多，
+ * 且失敗仍由 QUIZ_ASSEMBLY_FAILED 兜底。
+ */
+const GREEDY_ATTEMPTS = 8;
 
 /**
  * 逐題亂猜期望得分（規格 D14）。
@@ -344,9 +358,13 @@ function shuffle(arr, rng) {
  */
 export function buildIndex(items) {
   const byAns = new Map();
+  const byShape = new Map();
   for (const it of items) {
     if (!byAns.has(it.ans)) byAns.set(it.ans, []);
     byAns.get(it.ans).push(it);
+    const sk = shapeKey(it);
+    if (!byShape.has(sk)) byShape.set(sk, []);
+    byShape.get(sk).push(it);
   }
   const union = new Map();
   for (const [ans, recs] of byAns) {
@@ -358,7 +376,21 @@ export function buildIndex(items) {
     }
     union.set(ans, { shape, color });
   }
-  return { byAns, union, keys: [...byAns.keys()] };
+  return { byAns, byShape, union, keys: [...byAns.keys()] };
+}
+
+const shapeKey = (it) => it.shape.join('|');
+
+/**
+ * D12：L2 判別鍵。**刻意去掉 `score_mark` 與 `size`**——
+ * 那兩項在照片上是弱訊號（刻痕淺、尺寸要比對標尺），
+ * 兩個答案鍵只差一個 `size` 值就能通過 v2 的 Q5，四張圖擺一起卻無從分辨。
+ *
+ * L2 誘答刻意選同形同色，因此本鍵相異實際上退化為「刻字必須不同」——
+ * L2 的可解性完全押在刻字差異上，這是刻意的（見規格 §0 的 G1 gate）。
+ */
+export function l2Key(it) {
+  return `${shapeKey(it)}#${it.color.join('|')}#${squash(it.mark1 || '')}#${squash(it.mark2 || '')}`;
 }
 
 /** 該級每題需要幾個誘答（L2 多備 2 個供資源失敗時替換） */
@@ -377,6 +409,59 @@ function candidateOk(candAns, correct, index, level) {
 }
 
 /**
+ * L2 候選**紀錄**（不是答案鍵）。
+ *
+ * 這是 L1 與 L2 的本質差異：L1 顯示藥名，所以該藥名的**每一種外觀**
+ * 都必須與正解不相交；L2 顯示的是一張特定照片，所以只有**那筆紀錄**
+ * 的外觀需要匹配。用答案鍵層級的聯集來篩 L2 會錯得很離譜。
+ *
+ * 每個答案鍵只取一筆代表紀錄（H1 要求答案鍵互異）。
+ */
+function l2Candidates(correct, index, relaxColor) {
+  const ck = correct.color.join('|');
+  const correctKey = l2Key(correct);
+  const seen = new Set();
+  const out = [];
+  for (const rec of index.byShape.get(shapeKey(correct)) || []) {
+    if (rec.ans === correct.ans || seen.has(rec.ans)) continue;
+    const sameColor = rec.color.join('|') === ck;
+    // 放寬第 1 階只放寬顏色；形狀相同與 L2key 相異永不放寬（規格 §4.3）
+    if (!sameColor && !(relaxColor && rec.color.some((c) => correct.color.includes(c)))) continue;
+    if (l2Key(rec) === correctKey) continue;
+    if (nameCollides(rec.ans, correct.ans)) continue;
+    seen.add(rec.ans);
+    out.push(rec);
+  }
+  return out;
+}
+
+/**
+ * 自候選中貪婪挑出 need 筆兩兩合法者。
+ *
+ * 「兩兩合法」是 D15 的關鍵：如此一來 L2 任取 3 個必合法，
+ * 備援替換不需要重新驗證任何條件。
+ */
+function pickMutuallyValid(cands, need, level, rng) {
+  const c = cands.slice();                     // 不動索引內的陣列（D20）
+  shuffle(c, rng);
+  const chosen = [];
+  const keys = new Set();
+  for (const rec of c) {
+    if (chosen.length === need) break;
+    if (level === Level.L2) {
+      const k = l2Key(rec);
+      if (keys.has(k)) continue;               // L2key 兩兩相異（D12）
+      if (chosen.some((o) => nameCollides(rec.ans, o.ans))) continue;
+      keys.add(k);
+    } else if (chosen.some((o) => nameCollides(rec.ans, o.ans))) {
+      continue;                                // H3
+    }
+    chosen.push(rec);
+  }
+  return chosen.length === need ? chosen : null;
+}
+
+/**
  * 階段 1（規格 D19）：該級的可用答案鍵集合。**純判定，不用 RNG。**
  *
  * D18 的定義：答案鍵可用 ⟺ `drawQuiz` 可能抽到的**每一筆紀錄**都能組題。
@@ -388,17 +473,32 @@ export function eligibleKeys(index, level) {
   const need = needDistractors(level);
   const out = new Set();
   for (const [ans, recs] of index.byAns) {
-    const ok = recs.every((rec) => {
-      let n = 0;
-      for (const candAns of index.keys) {
-        if (candidateOk(candAns, rec, index, level)) n++;
-        if (n >= need) return true;
-      }
-      return false;
-    });
-    if (ok) out.add(ans);
+    if (recs.every((rec) => recordEligible(rec, index, level, need))) out.add(ans);
   }
   return out;
+}
+
+/** 單筆紀錄能否組題。不用 RNG——可用性判定與隨機選擇必須分離（覆審 4-6） */
+function recordEligible(rec, index, level, need) {
+  if (level === Level.L2) {
+    // 嚴格階段不足時才看放寬階段（§4.3 的固定放寬順序）
+    for (const relax of [false, true]) {
+      if (pickMutuallyValid(l2Candidates(rec, index, relax), need, level, () => 0)) return true;
+    }
+    return false;
+  }
+  let n = 0;
+  for (const candAns of index.keys) {
+    if (candidateOk(candAns, rec, index, level)) n++;
+    if (n >= need) return true;
+  }
+  return false;
+}
+
+/** L2 該紀錄在**嚴格**階段（同形同色）是否可組題——A9 的回歸基準 */
+export function strictlyEligibleL2(rec, index) {
+  return !!pickMutuallyValid(
+    l2Candidates(rec, index, false), needDistractors(Level.L2), Level.L2, () => 0);
 }
 
 /**
@@ -414,27 +514,34 @@ export function eligibleKeys(index, level) {
 export function buildChoices(correct, index, { level, rng, excludeAns } = {}) {
   const exclude = excludeAns || new Set();
   const need = needDistractors(level);
+  const usable = (rec) => !(exclude.has(rec.ans) && rec.ans !== correct.ans);
 
-  const cands = [];
-  for (const ans of index.keys) {
-    if (exclude.has(ans) && ans !== correct.ans) continue;
-    if (candidateOk(ans, correct, index, level)) cands.push(ans);
+  let picked = null;
+  if (level === Level.L2) {
+    // 固定放寬順序：嚴格（同形同色）→ 顏色相交。形狀與 L2key 永不放寬
+    for (const relax of [false, true]) {
+      const cands = l2Candidates(correct, index, relax).filter(usable);
+      for (let t = 0; t < GREEDY_ATTEMPTS && !picked; t++) {
+        picked = pickMutuallyValid(cands, need, level, rng);
+      }
+      if (picked) break;
+    }
+  } else {
+    const cands = index.keys
+      .filter((ans) => candidateOk(ans, correct, index, level))
+      .map((ans) => pick(index.byAns.get(ans), rng))
+      .filter(usable);
+    for (let t = 0; t < GREEDY_ATTEMPTS && !picked; t++) {
+      picked = pickMutuallyValid(cands, need, level, rng);
+    }
   }
-  shuffle(cands, rng);                       // cands 是新陣列，未動索引
 
-  const chosen = [];
-  for (const ans of cands) {
-    if (chosen.length === need) break;
-    if (chosen.some((o) => nameCollides(ans, o))) continue;   // 誘答彼此（H3）
-    chosen.push(ans);
-  }
-  if (chosen.length < need) {
-    const err = new Error(`答案鍵 ${correct.ans} 的合法誘答僅 ${chosen.length} 個，不足 ${need}`);
+  if (!picked) {
+    const err = new Error(`答案鍵 ${correct.ans} 湊不到 ${need} 個兩兩合法的誘答`);
     err.code = 'NO_DISTRACTORS';
     throw err;
   }
 
-  const picked = chosen.map((a) => pick(index.byAns.get(a), rng));
   const options = [correct, ...picked.slice(0, CHOICE_COUNT - 1)];
   shuffle(options, rng);                     // H4：位置由 RNG 決定
   return {
@@ -453,9 +560,11 @@ export function buildChoices(correct, index, { level, rng, excludeAns } = {}) {
  *
  * @throws {Error} code = 'INSUFFICIENT_KEYS' | 'QUIZ_ASSEMBLY_FAILED'
  */
-export function drawLeveledQuiz(items, { level, n = QUIZ_SIZE, rng = Math.random, index } = {}) {
+export function drawLeveledQuiz(items, { level, n = QUIZ_SIZE, rng = Math.random, index, eligible: pre } = {}) {
   const idx = index || buildIndex(items);
-  const eligible = eligibleKeys(idx, level);
+  // L2 的 eligibility 掃描約 1.6 秒（每筆紀錄都要試組），呼叫端應快取後傳入，
+  // 否則每回合開始都會卡住主執行緒
+  const eligible = pre || eligibleKeys(idx, level);
 
   // 選擇題的下限不是 n，而是 n + 每題誘答數。
   // H2 禁止誘答等於本卷其他題的正解——若可用答案鍵恰好等於 n，
@@ -495,6 +604,40 @@ export function drawLeveledQuiz(items, { level, n = QUIZ_SIZE, rng = Math.random
   const err = new Error(`整卷組裝連續 ${MAX_QUIZ_ATTEMPTS} 次失敗：${last?.message ?? ''}`);
   err.code = 'QUIZ_ASSEMBLY_FAILED';
   throw err;
+}
+
+/**
+ * D16：挑一個要排除的誘答格。
+ *
+ * **絕不回傳 `answerIdx`**，也不回傳已排除的格。
+ * 回傳 -1 表示無可排除者（理論上不會發生，呼叫端仍須處理）。
+ */
+export function pickEliminated(q, rng = Math.random) {
+  const cand = [];
+  for (let i = 0; i < CHOICE_COUNT; i++) {
+    if (i === q.answerIdx || q.eliminated === i) continue;
+    cand.push(i);
+  }
+  if (!cand.length) return -1;
+  return cand[Math.floor(rng() * cand.length)];
+}
+
+/**
+ * D15：消耗一個備援替換指定格，回傳新的題目狀態。
+ *
+ * 因為 5 個誘答是**兩兩合法**產生的，替換後無須重新驗證任何條件——
+ * 這正是那個設計要換來的東西。
+ *
+ * @returns {object|null} 無法替換時回傳 null（呼叫端應作廢該題）
+ */
+export function replaceOption(q, slotIdx) {
+  if (!Array.isArray(q.spares) || q.spares.length === 0) return null;   // 備援耗盡
+  if (!Number.isInteger(slotIdx) || slotIdx < 0 || slotIdx >= CHOICE_COUNT) return null;
+  if (slotIdx === q.answerIdx) return null;      // 正解格不可替換，只能作廢
+  if (q.eliminated === slotIdx) return null;     // 已排除的格不參與替換
+  const options = q.options.slice();
+  options[slotIdx] = q.spares[0];
+  return { ...q, options, spares: q.spares.slice(1) };
 }
 
 /**
