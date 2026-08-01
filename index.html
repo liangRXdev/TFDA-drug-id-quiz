@@ -93,6 +93,48 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .metric .interp.muted { color: var(--text-muted); }
 .metric .interp.warn { color: var(--danger); }
 
+/* 難度選擇 */
+.levels { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 0.6rem; margin: 0.9rem 0 0.2rem; }
+.level {
+  display: flex; flex-direction: column; gap: 0.15rem; text-align: left;
+  padding: 0.7rem 0.8rem; background: #fff; color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: 6px; font-weight: 400;
+}
+.level:hover:not(:disabled) { background: var(--accent-light); border-color: var(--accent); }
+.level[aria-checked="true"] { border-color: var(--accent); background: var(--accent-light); box-shadow: 0 0 0 2px var(--accent-light); }
+.level .lv-name { font-size: 0.95rem; font-weight: 700; color: var(--accent); }
+.level .lv-desc { font-size: 0.76rem; }
+.level .lv-meta { font-size: 0.68rem; color: var(--text-muted); }
+.level-warn { font-size: 0.75rem; color: var(--warning); margin: 0.5rem 0 0; }
+
+/* 選擇題選項 */
+.options { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 1.1rem; }
+.opt {
+  display: flex; align-items: center; gap: 0.6rem; width: 100%; text-align: left;
+  min-height: 44px; padding: 0.6rem 0.8rem; font-family: var(--mono); font-size: 0.92rem;
+  background: #fff; color: var(--text-primary); border: 1px solid var(--border); font-weight: 500;
+  word-break: break-word;
+}
+.opt:hover:not(:disabled) { background: var(--accent-light); border-color: var(--accent); }
+.opt .key {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 1.6rem; height: 1.6rem; border-radius: 50%; background: var(--border);
+  color: var(--text-muted); font-size: 0.75rem; font-weight: 700;
+}
+.opt.ok { border-color: var(--success); background: rgba(39,174,96,0.08); }
+.opt.ok .key { background: var(--success); color: #fff; }
+.opt.no { border-color: var(--danger); background: rgba(192,57,43,0.07); }
+.opt.no .key { background: var(--danger); color: #fff; }
+.opt:disabled { opacity: 1; cursor: default; }
+.opt.dim:disabled { opacity: 0.55; }
+
+/* 級別徽章 */
+.badge {
+  display: inline-block; font-size: 0.7rem; font-weight: 700; padding: 0.1rem 0.55rem;
+  border-radius: 99px; background: var(--accent); color: #fff; vertical-align: middle;
+}
+.baseline { font-size: 0.75rem; color: var(--text-muted); margin-top: 0.2rem; }
+
 /* 作答 */
 .answer-row { display: flex; gap: 0.6rem; margin-top: 1.1rem; flex-wrap: wrap; }
 input[type=text] {
@@ -163,11 +205,15 @@ input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow:
 
   <!-- 開始 -->
   <section id="start" class="card hidden">
-    <h2><span class="step-num">1</span>開始測驗</h2>
+    <h2><span class="step-num">1</span>選擇難度</h2>
     <p class="hint">每回合隨機 <span id="introN">20</span> 題，答案鍵不重複。作答後即鎖定，無法重試。</p>
-    <div class="test-info" id="poolInfo"></div>
+
+    <div class="levels" id="levelPick" role="radiogroup" aria-label="難度"></div>
+    <p class="level-warn hidden" id="levelWarn"></p>
+
+    <div class="test-info" id="poolInfo" style="margin-top:0.9rem"></div>
     <div class="btn-row">
-      <button id="btnStart">開始測驗</button>
+      <button id="btnStart" disabled>請先選擇難度</button>
     </div>
   </section>
 
@@ -183,15 +229,21 @@ input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow:
 
     <div class="results" id="qFeatures"></div>
 
-    <div class="answer-row">
-      <input type="text" id="qInput" placeholder="輸入英文品名" autocomplete="off"
-             autocapitalize="characters" spellcheck="false" enterkeyhint="send">
-      <button id="btnSubmit">送出</button>
-      <button id="btnHint" class="ghost">提示</button>
+    <!-- L1/L2：選擇題 -->
+    <div class="options hidden" id="qOptions"></div>
+
+    <!-- L3：自由輸入 -->
+    <div id="inputMode">
+      <div class="answer-row">
+        <input type="text" id="qInput" placeholder="輸入英文品名" autocomplete="off"
+               autocapitalize="characters" spellcheck="false" enterkeyhint="send">
+        <button id="btnSubmit">送出</button>
+        <button id="btnHint" class="ghost">提示</button>
+      </div>
+      <p class="hint" style="margin:0.5rem 0 0">
+        只需輸入品名核心字串，不必輸入藥廠名、含量與劑型。用提示該題滿分由 1.0 降為 0.5。
+      </p>
     </div>
-    <p class="hint" style="margin:0.5rem 0 0">
-      只需輸入品名核心字串，不必輸入藥廠名、含量與劑型。用提示該題滿分由 1.0 降為 0.5。
-    </p>
 
     <div id="qHint" class="hint-box hidden"></div>
     <div id="qVerdict" class="verdict hidden"></div>
@@ -203,14 +255,14 @@ input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow:
 
   <!-- 成績 -->
   <section id="result" class="card hidden">
-    <h2><span class="step-num">✓</span>測驗結果</h2>
+    <h2><span class="step-num">✓</span>測驗結果 <span class="badge" id="resultBadge"></span></h2>
     <p class="hint" id="resultSub"></p>
     <div class="results" id="resultMetrics"></div>
 
     <h2 style="margin-top:1.5rem;font-size:0.95rem">逐題檢討</h2>
     <div class="table-scroll">
       <table class="review">
-        <thead><tr><th>#</th><th>正解</th><th>你的作答</th><th>得分</th></tr></thead>
+        <thead><tr id="reviewHead"><th>#</th><th>正解</th><th>你的作答</th><th>得分</th></tr></thead>
         <tbody id="reviewBody"></tbody>
       </table>
     </div>
