@@ -212,7 +212,14 @@ export function transition(q, ev) {
     case 'hint':
       // 已鎖定後不可取提示；此處 cur 必為 PENDING 或 HINTED
       if (cur === QState.HINTED) return q; // 重複點提示不重複扣分
-      return { ...q, state: QState.HINTED, mark: HINTED_MARK };
+      return {
+        ...q,
+        state: QState.HINTED,
+        mark: HINTED_MARK,
+        // 選擇題取提示後變三選一且滿分 0.5，亂猜期望隨之下降（規格 D14）。
+        // 自由輸入題沒有猜測基線，維持 0。
+        chance: q.options ? CHANCE.THREE : q.chance,
+      };
 
     case 'submit':
       // 首次送出即鎖定，不可重試（允許重試等於允許窮舉）
@@ -226,9 +233,21 @@ export function transition(q, ev) {
   }
 }
 
-/** 建立初始題目狀態 */
-export function newQuestion(item) {
-  return { item, state: QState.PENDING, correct: false, mark: FULL_MARK };
+/**
+ * 建立初始題目狀態。
+ *
+ * `extra` 承載選擇題的附加欄位（規格 §5.2）：token / level / options /
+ * answerIdx / spares / chance。L3 不傳即維持 v2 語意。
+ */
+export function newQuestion(item, extra = {}) {
+  return {
+    item,
+    state: QState.PENDING,
+    correct: false,
+    mark: FULL_MARK,
+    chance: CHANCE.NONE,
+    ...extra,
+  };
 }
 
 // ── 計分（規格 6.6）───────────────────────────────────────────────────
@@ -243,6 +262,7 @@ export function scoreQuiz(questions) {
   let voided = 0;
   let hints = 0;
   let correct = 0;
+  let chanceSum = 0;
 
   for (const q of questions) {
     if (q.state === QState.VOID) {
@@ -250,6 +270,9 @@ export function scoreQuiz(questions) {
       continue;
     }
     counted++;
+    // 亂猜基線逐題加總（規格 D14）。此處只做加總，
+    // 刻意不讓計分核心知道 level——級別是 UI metadata，不該耦合進來。
+    chanceSum += q.chance || 0;
     if (q.mark === HINTED_MARK) hints++;
     if (q.correct) {
       earned += q.mark;
@@ -257,12 +280,230 @@ export function scoreQuiz(questions) {
     }
   }
   const score = counted ? (earned / counted) * 100 : 0;
+  const chance = counted ? (chanceSum / counted) * 100 : 0;
   return {
     score: Math.round(score * 10) / 10,
+    chance: Math.round(chance * 10) / 10,
     earned,
     counted,
     correct,
     voided,
     hints,
   };
+}
+
+// ── 難度分級（規格 v3）────────────────────────────────────────────────
+
+export const Level = { L1: 'L1', L2: 'L2', L3: 'L3' };
+export const CHOICE_COUNT = 4;
+/** L2 需 3 正式 + 2 備援；L1 只要 3（spares 恆空，規格 D15） */
+export const DISTRACTOR_COUNT = 5;
+export const MAX_QUIZ_ATTEMPTS = 3;
+
+/**
+ * 逐題亂猜期望得分（規格 D14）。
+ * 基線是逐題加總的結果，不是可以寫死在 UI 的固定值——
+ * 三選一且滿分 0.5 的期望是 0.167，不是 0.25。
+ */
+export const CHANCE = {
+  FOUR: FULL_MARK / CHOICE_COUNT,             // 0.25
+  THREE: HINTED_MARK / (CHOICE_COUNT - 1),    // ≈0.1667
+  NONE: 0,
+};
+
+/**
+ * D13：同題選項的名稱碰撞。
+ * 比較輸入一律為 squash(答案鍵)，不再做其他前處理；
+ * 完全相等交由 H1（答案鍵互異）處理，不重複計為前綴碰撞。
+ */
+export function nameCollides(a, b) {
+  const x = squash(a);
+  const y = squash(b);
+  if (x === y) return false;
+  if (editDistance(x, y, 1) <= 1) return true;
+  return x.startsWith(y) || y.startsWith(x);
+}
+
+const disjoint = (arr, set) => !arr.some((v) => set.has(v));
+
+/** 就地洗牌，呼叫端負責先複製（規格 D20：不得改動共享陣列） */
+function shuffle(arr, rng) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+/**
+ * 建索引。回傳物件與傳入的 items 皆視為不可變（規格 D20）。
+ *
+ * `union` 存的是**該答案鍵所有紀錄的外觀聯集**，不是任一代表紀錄。
+ * L1 誘答要能被「我知道那顆藥長怎樣」排除，就必須該藥名的每一種外觀
+ * 都與正解不同——只比對代表紀錄會漏掉同名不同廠的其他外觀。
+ */
+export function buildIndex(items) {
+  const byAns = new Map();
+  for (const it of items) {
+    if (!byAns.has(it.ans)) byAns.set(it.ans, []);
+    byAns.get(it.ans).push(it);
+  }
+  const union = new Map();
+  for (const [ans, recs] of byAns) {
+    const shape = new Set();
+    const color = new Set();
+    for (const r of recs) {
+      for (const s of r.shape) shape.add(s);
+      for (const c of r.color) color.add(c);
+    }
+    union.set(ans, { shape, color });
+  }
+  return { byAns, union, keys: [...byAns.keys()] };
+}
+
+/** 該級每題需要幾個誘答（L2 多備 2 個供資源失敗時替換） */
+const needDistractors = (level) =>
+  level === Level.L2 ? DISTRACTOR_COUNT : CHOICE_COUNT - 1;
+
+/** 單一誘答對正解的條件（不含誘答彼此的兩兩條件） */
+function candidateOk(candAns, correct, index, level) {
+  if (candAns === correct.ans) return false;
+  if (nameCollides(candAns, correct.ans)) return false;
+  if (level === Level.L1) {
+    const u = index.union.get(candAns);
+    return disjoint(correct.shape, u.shape) && disjoint(correct.color, u.color);
+  }
+  return true;
+}
+
+/**
+ * 階段 1（規格 D19）：該級的可用答案鍵集合。**純判定，不用 RNG。**
+ *
+ * D18 的定義：答案鍵可用 ⟺ `drawQuiz` 可能抽到的**每一筆紀錄**都能組題。
+ * 不是「至少一筆可用」——後者會讓同一答案鍵有時可出題有時炸掉，
+ * 產生難以重現的失敗。
+ */
+export function eligibleKeys(index, level) {
+  if (level === Level.L3) return new Set(index.keys);
+  const need = needDistractors(level);
+  const out = new Set();
+  for (const [ans, recs] of index.byAns) {
+    const ok = recs.every((rec) => {
+      let n = 0;
+      for (const candAns of index.keys) {
+        if (candidateOk(candAns, rec, index, level)) n++;
+        if (n >= need) return true;
+      }
+      return false;
+    });
+    if (ok) out.add(ans);
+  }
+  return out;
+}
+
+/**
+ * 階段 2（規格 D19）：為單一正解紀錄組裝選項。
+ *
+ * 產出的誘答**兩兩皆合法**，因此 L2 任取 3 個必合法——
+ * 備援替換不需要重新驗證任何條件（規格 D15）。
+ *
+ * @param {object} correct    已抽定的紀錄本身（不變量 I1）
+ * @param {Set}    excludeAns 整卷正解答案鍵集合（H2）
+ * @throws {Error} code = 'NO_DISTRACTORS'
+ */
+export function buildChoices(correct, index, { level, rng, excludeAns } = {}) {
+  const exclude = excludeAns || new Set();
+  const need = needDistractors(level);
+
+  const cands = [];
+  for (const ans of index.keys) {
+    if (exclude.has(ans) && ans !== correct.ans) continue;
+    if (candidateOk(ans, correct, index, level)) cands.push(ans);
+  }
+  shuffle(cands, rng);                       // cands 是新陣列，未動索引
+
+  const chosen = [];
+  for (const ans of cands) {
+    if (chosen.length === need) break;
+    if (chosen.some((o) => nameCollides(ans, o))) continue;   // 誘答彼此（H3）
+    chosen.push(ans);
+  }
+  if (chosen.length < need) {
+    const err = new Error(`答案鍵 ${correct.ans} 的合法誘答僅 ${chosen.length} 個，不足 ${need}`);
+    err.code = 'NO_DISTRACTORS';
+    throw err;
+  }
+
+  const picked = chosen.map((a) => pick(index.byAns.get(a), rng));
+  const options = [correct, ...picked.slice(0, CHOICE_COUNT - 1)];
+  shuffle(options, rng);                     // H4：位置由 RNG 決定
+  return {
+    options,
+    answerIdx: options.indexOf(correct),
+    spares: level === Level.L2 ? picked.slice(CHOICE_COUNT - 1) : [],
+  };
+}
+
+/**
+ * 整卷生成（規格 D19 兩階段）。
+ *
+ * 先定完整正解集合再組選項——逐題組裝會讓後補的正解**回溯破壞**
+ * 先前題目的 H2。組裝失敗時整卷重抽，不做局部補抽（局部補抽同樣會破壞 H2，
+ * 且會讓誘答池大的答案鍵被高估，違反 v2 D5 的答案鍵均勻）。
+ *
+ * @throws {Error} code = 'INSUFFICIENT_KEYS' | 'QUIZ_ASSEMBLY_FAILED'
+ */
+export function drawLeveledQuiz(items, { level, n = QUIZ_SIZE, rng = Math.random, index } = {}) {
+  const idx = index || buildIndex(items);
+  const eligible = eligibleKeys(idx, level);
+
+  // 選擇題的下限不是 n，而是 n + 每題誘答數。
+  // H2 禁止誘答等於本卷其他題的正解——若可用答案鍵恰好等於 n，
+  // 全部答案鍵都是正解，合法誘答數為 0，必然組不出任何一題。
+  // 這是**必要非充分**條件；剩下的組合失敗由 QUIZ_ASSEMBLY_FAILED 兜底。
+  const minKeys = level === Level.L3 ? n : n + needDistractors(level);
+  if (eligible.size < minKeys) {
+    const err = new Error(
+      `${level} 可用答案鍵僅 ${eligible.size} 個，不足 ${minKeys} 個`
+      + (level === Level.L3 ? '' : `（${n} 題正解 + 每題 ${needDistractors(level)} 個誘答）`));
+    err.code = 'INSUFFICIENT_KEYS';
+    err.available = eligible.size;
+    err.required = minKeys;
+    throw err;
+  }
+  const pool = items.filter((it) => eligible.has(it.ans));
+  const baseChance = level === Level.L3 ? CHANCE.NONE : CHANCE.FOUR;
+
+  let last;
+  for (let attempt = 0; attempt < MAX_QUIZ_ATTEMPTS; attempt++) {
+    const corrects = drawQuiz(pool, n, rng);            // 答案鍵均勻（v2 D5）
+    const excludeAns = new Set(corrects.map((c) => c.ans));
+    try {
+      return corrects.map((c, i) => newQuestion(c, {
+        token: i + 1,                                    // 遞補不重用（D18）
+        level,
+        chance: baseChance,
+        ...(level === Level.L3
+          ? {}
+          : buildChoices(c, idx, { level, rng, excludeAns })),
+      }));
+    } catch (e) {
+      if (e.code !== 'NO_DISTRACTORS') throw e;
+      last = e;
+    }
+  }
+  const err = new Error(`整卷組裝連續 ${MAX_QUIZ_ATTEMPTS} 次失敗：${last?.message ?? ''}`);
+  err.code = 'QUIZ_ASSEMBLY_FAILED';
+  throw err;
+}
+
+/**
+ * 選擇題判定。嚴格整數相等，不做任何型別轉換——
+ * DOM `dataset` 取出來全是字串，`"1" == 1` 的寬鬆比較會誤判為對。
+ */
+export function judgeChoice(pickedIdx, answerIdx) {
+  if (!Number.isInteger(pickedIdx) || !Number.isInteger(answerIdx)) return false;
+  if (pickedIdx < 0 || pickedIdx >= CHOICE_COUNT) return false;
+  if (answerIdx < 0 || answerIdx >= CHOICE_COUNT) return false;
+  return pickedIdx === answerIdx;
 }
