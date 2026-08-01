@@ -85,6 +85,39 @@ localhost 無 gzip，量到的是最壞值，兩項都仍通過門檻，因此 G
 - **`update-pool.yml` Actions 未固定 SHA**（Codex 評 High，判定正確）是 `main` 既有問題，
   **另案**處理，不阻斷本次合併。
 
+## 待修清單（2026-08-01 收工時狀態）
+
+理由與判定依據見 `verdict-v3.md` 的對應編號，此處只列「要做什麼」。
+
+**擋合併**
+
+- [ ] **#1+#4 `drawSpare()` 遞補 + 整卷 validator**（`app.js:470`、`engine.js:591`）
+      ——見上方阻斷項的修法。這是唯一的功能缺陷。
+
+**合併後補，依優先序**
+
+- [ ] #10 C17 測試斷言反向（`tests/ui-smoke.test.mjs:187`）——真 bug，一行
+- [ ] #11 C8 拿掉 `length >= 2` 過濾、納入 `title`／`aria-label`（`:231`）
+- [ ] #13 C11 補「同題同格已換 src」反例——真實瀏覽器最常見路徑，測試反而沒蓋
+- [ ] #3 L1 eligibility 補誘答兩兩 H3 判定（`engine.js:490-495`）
+- [ ] #7 A10 空 `shape`／`color` guard（`engine.js:341` `disjoint([],set)` 恆真）
+      ＋ `verify` 補非空斷言
+- [ ] #12／#15／#16 補 C9/C10 失敗矩陣、C16 三級答對與提示、A18 的 L2 全鏈路
+- [ ] #14 C13 改用真 Canvas 產 PNG（真機版面已人工驗過，缺的是自動化）
+- [ ] #5 規格回填：把 `slotAsset[]` 改寫為「現值讀取」（**不要**加平行陣列）
+- [ ] #6 `img.decode()` 以貼合 D21 字面
+- [ ] #9 §4.4 紅線 3,000 → 2,850；#17 A20 補邊界；#18 `app.js:113,266+` 補 escape
+- [ ] #8 正式 GH Pages 冷快取 trace 複驗 C14
+
+**另案（非本分支造成）**
+
+- [ ] #19 `update-pool.yml` 的 Actions 固定完整 SHA、鎖 Pillow/requests 版本
+      ——`main` 既有的供應鏈入口風險，下次自動題庫更新前處理
+
+**不處理**
+
+- G1 gate 補跑 30 題 —— 已決議目視結案，僅在出現「題目不可解」回報時才跑（seed `20260801`）
+
 ## 合併前建議
 
 跑一次 `/codex-review` 覆審這三個 commit。理由不是形式：
