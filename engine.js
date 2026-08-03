@@ -596,7 +596,7 @@ export function drawLeveledQuiz(items, { level, n = QUIZ_SIZE, rng = Math.random
           ? {}
           : buildChoices(c, idx, { level, rng, excludeAns })),
       }));
-      assertQuizInvariants(quiz, level);                 // D19 最後一步
+      assertQuizInvariants(quiz, level, idx);            // D19 最後一步
       return quiz;
     } catch (e) {
       if (e.code !== 'NO_DISTRACTORS') throw e;          // 含 INVARIANT_VIOLATED：重抽只會掩蓋 bug
@@ -626,17 +626,28 @@ export function seenAnsKeys(questions) {
 }
 
 /**
- * D19 的最後一道防線：對整卷驗證 H1–H4 與 I1／I3／I5。
+ * D19 的最後一道防線：對整卷驗證**靜態題卷能驗的那一層**不變量。
  *
  * 測試全綠不等於這道檢查存在。它守的是**執行期才組出來的題卷**——
  * 尤其是遞補後才成形的組合，那是測試無法窮舉的路徑。
  *
+ * **驗得到**：H1、H2、H3、I1、I3。
+ * **只驗得到弱形式**：H4——靜態快照無法回推「位置是否由 RNG 決定」，
+ * 這裡只抓「整卷正解恆在同一格」這個忘記洗牌唯一會產生的樣態（heuristic）。
+ * H4 的真正證據是 A13(a)–(d)（controlled RNG、題號獨立性、分布）。
+ * **驗不到**：I2 由 I1 蘊含（題幹讀 `q.item`、正解格讀 `options[answerIdx]`，
+ * 兩者物件同一即同一紀錄），不另立檢查以免同一件事兩處判定而漂移；
+ * I4 與 I5 的「格位 token／目前資產 identity」是跨渲染的事件鏈性質，
+ * 靜態 `Question[]` 沒有渲染歷程可驗，守它們的是 C11 與 A18。
+ *
  * 回傳違規描述而不直接拋出：呼叫端對「生成時違規」（bug，中止）與
  * 「遞補後違規」（中止本回合並告知使用者）要有不同處置。
+ * 每筆以 `[代碼]` 開頭，供呼叫端只顯示代碼——訊息本身含藥名，不可直接給使用者。
  *
+ * @param {object} index 選擇題必傳。缺少時**不放行**（I3 無從驗證）
  * @returns {string[]} 空陣列表示通過
  */
-export function validateQuizInvariants(questions, { level } = {}) {
+export function validateQuizInvariants(questions, { level, index } = {}) {
   const bad = [];
   const lvl = level ?? questions[0]?.level ?? Level.L3;
   const tokens = new Set();
@@ -644,43 +655,51 @@ export function validateQuizInvariants(questions, { level } = {}) {
 
   questions.forEach((q, i) => {
     const at = `第 ${i + 1} 題`;
-    // I5：題目 token 全卷唯一。遞補會使題號位移，token 是唯一穩定的身分
-    if (!Number.isInteger(q.token)) bad.push(`${at}：缺少題目 token（I5）`);
-    else if (tokens.has(q.token)) bad.push(`${at}：題目 token ${q.token} 重複（I5）`);
+    // I5（可驗的部分）：題目 token 全卷唯一。遞補會使題號位移，token 是唯一穩定的身分
+    if (!Number.isInteger(q.token)) bad.push(`[I5] ${at}：缺少題目 token`);
+    else if (tokens.has(q.token)) bad.push(`[I5] ${at}：題目 token ${q.token} 重複`);
     tokens.add(q.token);
     // H1（卷層級）：正解答案鍵兩兩相異
-    if (corrects.has(q.item.ans)) bad.push(`${at}：正解答案鍵 ${q.item.ans} 重複（H1）`);
+    if (corrects.has(q.item.ans)) bad.push(`[H1] ${at}：正解答案鍵 ${q.item.ans} 重複`);
     corrects.add(q.item.ans);
   });
 
   if (lvl === Level.L3) return bad;                      // 無選項，其餘不變量不適用
+
+  // 沒有索引就驗不了紀錄身分。此時**判為違規**而非略過：
+  // 「少傳一個參數就靜默降級成弱檢查」正是這道防線最容易失效的方式
+  if (!index?.byAns) return [...bad, '[I3] 缺少 PoolIndex，無法驗證選項的紀錄身分'];
+  const known = (r) => index.byAns.get(r.ans)?.includes(r) === true;
 
   const maxSpares = lvl === Level.L2 ? DISTRACTOR_COUNT - (CHOICE_COUNT - 1) : 0;
   questions.forEach((q, i) => {
     const at = `第 ${i + 1} 題`;
     const opts = q.options || [];
     if (opts.length !== CHOICE_COUNT) {
-      bad.push(`${at}：選項數 ${opts.length} ≠ ${CHOICE_COUNT}`);
+      bad.push(`[I1] ${at}：選項數 ${opts.length} ≠ ${CHOICE_COUNT}`);
       return;
     }
     if (!Number.isInteger(q.answerIdx) || q.answerIdx < 0 || q.answerIdx >= CHOICE_COUNT) {
-      bad.push(`${at}：answerIdx ${q.answerIdx} 超出範圍`);
+      bad.push(`[I1] ${at}：answerIdx ${q.answerIdx} 超出範圍`);
     } else if (opts[q.answerIdx] !== q.item) {
       // I1：必須是 correctItem **本身**。同 ans 的另一筆紀錄會讓題幹與正解格
       // 來自不同照片，畫面上看不出來，但 L2 直接變成不可解
-      bad.push(`${at}：answerIdx 未指向 correctItem 本身（I1）`);
+      bad.push(`[I1] ${at}：answerIdx 未指向 correctItem 本身`);
     }
 
     const spares = q.spares || [];
     // 上限而非等值：替換消耗備援後，同一卷的舊題會少於初始值
-    if (spares.length > maxSpares) bad.push(`${at}：備援 ${spares.length} 個超過上限 ${maxSpares}`);
+    if (spares.length > maxSpares) bad.push(`[D15] ${at}：備援 ${spares.length} 個超過上限 ${maxSpares}`);
 
     const all = [...opts, ...spares];
     const ids = new Set();
     for (const r of all) {
-      // I3：每個選項／備援都保有原始紀錄身分
-      if (!r || !r.id) { bad.push(`${at}：選項缺少紀錄身分 id（I3）`); continue; }
-      if (ids.has(r.id)) bad.push(`${at}：同題重複紀錄 ${r.id}（I3）`);
+      // I3：每個選項／備援都必須**是題庫裡的那一筆紀錄本身**。
+      // 只驗 id 非空是驗不出東西的——捏造一個唯一 id 就能通過，
+      // 而「只換 img 不換紀錄」正是 I3 要防的
+      if (!r || !r.id) { bad.push(`[I3] ${at}：選項缺少紀錄身分 id`); continue; }
+      if (!known(r)) { bad.push(`[I3] ${at}：選項 ${r.id} 不是題庫中的紀錄`); continue; }
+      if (ids.has(r.id)) bad.push(`[I3] ${at}：同題重複紀錄 ${r.id}`);
       ids.add(r.id);
     }
     for (let a = 0; a < all.length; a++) {
@@ -688,30 +707,32 @@ export function validateQuizInvariants(questions, { level } = {}) {
       if (!x?.id) continue;
       // H2：誘答與備援不得屬於本卷正解集合（本題正解除外）
       if (x !== q.item && corrects.has(x.ans)) {
-        bad.push(`${at}：誘答 ${x.ans} 屬於本卷正解集合（H2）`);
+        bad.push(`[H2] ${at}：誘答 ${x.ans} 屬於本卷正解集合`);
       }
       for (let b = a + 1; b < all.length; b++) {
         const y = all[b];
         if (!y?.id) continue;
-        if (x.ans === y.ans) bad.push(`${at}：答案鍵 ${x.ans} 重複（H1）`);
-        else if (nameCollides(x.ans, y.ans)) bad.push(`${at}：${x.ans} 與 ${y.ans} 名稱過近（H3）`);
-        if (lvl === Level.L2 && l2Key(x) === l2Key(y)) bad.push(`${at}：${x.ans} 與 ${y.ans} 的 L2key 碰撞（D12）`);
+        if (x.ans === y.ans) bad.push(`[H1] ${at}：答案鍵 ${x.ans} 重複`);
+        else if (nameCollides(x.ans, y.ans)) bad.push(`[H3] ${at}：${x.ans} 與 ${y.ans} 名稱過近`);
+        if (lvl === Level.L2 && l2Key(x) === l2Key(y)) bad.push(`[D12] ${at}：${x.ans} 與 ${y.ans} 的 L2key 碰撞`);
       }
     }
   });
 
-  // H4：無法事後驗「有沒有洗牌」，但「整卷正解恆在同一格」正是忘記洗牌
-  // 唯一會產生的樣態。20 題下誤判機率 4^-19，可以當硬條件。
-  if (questions.length >= 10) {
+  // H4 的弱形式（heuristic，不等於驗證了 H4）：整卷正解恆在同一格。
+  // 忘記洗牌一定會產生這個樣態，而它在畫面上完全看不出來。
+  // 門檻取 QUIZ_SIZE：滿卷時偽陽性機率 4^-19 ≈ 3.6e-12，可以當硬條件；
+  // 題數更少時機率不夠低（10 題為 3.8e-6），寧可不判。
+  if (questions.length >= QUIZ_SIZE) {
     const slots = new Set(questions.map((q) => q.answerIdx));
-    if (slots.size === 1) bad.push(`整卷正解恆在第 ${[...slots][0]} 格，未經洗牌（H4）`);
+    if (slots.size === 1) bad.push(`[H4] 整卷正解恆在第 ${[...slots][0]} 格，疑似未洗牌`);
   }
   return bad;
 }
 
 /** 生成路徑的硬中止：不變量違規是 bug，重抽只會把它變成偶發 */
-function assertQuizInvariants(quiz, level) {
-  const bad = validateQuizInvariants(quiz, { level });
+function assertQuizInvariants(quiz, level, index) {
+  const bad = validateQuizInvariants(quiz, { level, index });
   if (!bad.length) return;
   const err = new Error(`整卷不變量驗證失敗：${bad.join('；')}`);
   err.code = 'INVARIANT_VIOLATED';
@@ -728,6 +749,12 @@ function assertQuizInvariants(quiz, level) {
  *
  * 抽樣在**答案鍵層級均勻**（v2 D5）：按 pool 順序取第一個合格者是決定性的，
  * 會讓題庫前段的答案鍵在遞補時被系統性高估。
+ *
+ * 精確地說是「候選順序均勻隨機、取第一個能組出誘答者」——嚴格均勻要先算出
+ * 「在目前 `excludeAns` 下可組題的鍵集合」，那等於把 1.6 秒的 eligibility 掃描
+ * 搬進遞補路徑。實測代價為零：2026-08-03 於 3,913 筆題庫量測，遞補脈絡下的
+ * 候選鍵 L1 3,044／L2 2,939 個，**組不出誘答者皆為 0**，兩者退化為同一件事。
+ * 題庫改版後若該數字不再是 0，這裡才需要重新評估（見 `verdict-v3.5.md` 1.3）。
  *
  * @param {Set} [eligible] 該級可用答案鍵；省略表示全部可用（L3）
  * @returns {object|null} 無可用候選時回傳 null（呼叫端應中止本回合）

@@ -297,6 +297,11 @@ describe('C9/C10 L2 資源失敗', () => {
     assert.ok(!hidden('result'), '未走到成績頁');
     assert.match($('resultSub').textContent, /作廢 1 題/, '成績頁應標示作廢題數');
     assert.match($('resultSub').textContent, /計分 20 題/, '分母應維持 20');
+
+    // 此處**刻意不驗**「遞補正解不是原卷的誘答」：單次遞補從約 3,000 個候選中
+    // 撞上原卷約 120 個誘答的機率僅約 4%，寫成斷言等於恆真——實測以舊屏障
+    // （只避開正解）跑本測試仍全綠。要在 UI 層驗這條，得能注入受控的候選集合
+    // 或讀取 session 快照，併入待修 #12。engine 層由 A21 以 40 次抽樣＋mutation 守住。
   });
 });
 

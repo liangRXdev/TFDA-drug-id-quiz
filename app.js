@@ -161,6 +161,18 @@ function selectLevel(id) {
   $('btnStart').textContent = `開始 ${QUIZ_SIZE} 題測驗（${LEVELS[id].name}）`;
 }
 
+/**
+ * 不變量違規只給使用者看代碼，細節送主控台。
+ *
+ * 違規訊息含答案鍵——把它印在中止畫面等於揭露尚未作答題目的藥名。
+ * 回合雖已終止不影響計分，但沒有理由送分（覆審 v3.5 1.4）。
+ */
+function violationCodes(violations = []) {
+  console.error('[quiz] 題卷不變量違規：', violations);
+  const codes = violations.map((v) => /^\[([A-Z]\d+)\]/.exec(v)?.[1]).filter(Boolean);
+  return [...new Set(codes)].join('、') || '未知';
+}
+
 /** 該級可用答案鍵集合，整個 session 只算一次 */
 function eligibleFor(level) {
   if (!state.eligible.has(level)) {
@@ -193,7 +205,8 @@ function startQuiz() {
     if (e.code === 'INVARIANT_VIOLATED') {
       // 生成路徑違規是程式 bug，不是題庫問題——不要建議使用者改選難度
       return fatal('題卷未通過不變量驗證，已中止以免出到不可解或會洩題的題目。'
-        + `<br>${escapeHtml(e.violations?.[0] ?? e.message)}<br>請回報此問題。`);
+        + `<br>違規項目：${escapeHtml(violationCodes(e.violations))}`
+        + '<br>詳細診斷已輸出至瀏覽器主控台，請連同該內容回報。');
     }
     if (e.code === 'QUIZ_ASSEMBLY_FAILED') {
       return fatal('無法組出符合條件的題卷（誘答條件過嚴或題庫多樣性不足），已中止。'
@@ -470,11 +483,14 @@ function voidCurrent(reason) {
 
   // 遞補是唯一在執行期改變整卷組成的路徑，因此也是唯一需要事後複驗的地方（D19）。
   state.questions.push(spare);
-  const bad = validateQuizInvariants(state.questions, { level: state.quizLevel });
+  const bad = validateQuizInvariants(state.questions, {
+    level: state.quizLevel, index: state.index,
+  });
   if (bad.length) {
     state.questions.pop();
     return fatal('遞補題破壞了題卷不變量，中止本回合以免影響成績判讀。'
-      + `<br>${escapeHtml(bad[0])}`);
+      + `<br>違規項目：${escapeHtml(violationCodes(bad))}`
+      + '<br>詳細診斷已輸出至瀏覽器主控台，請連同該內容回報。');
   }
   state.idx++;
   if (state.idx < state.questions.length) renderQuestion();

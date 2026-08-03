@@ -830,26 +830,32 @@ describe('A21 遞補', () => {
         });
         assert.ok(sp);
         paper.push(sp);
-        assert.deepEqual(validateQuizInvariants(paper, { level }), [],
+        assert.deepEqual(validateQuizInvariants(paper, { level, index: index() }), [],
           `${level} 連續遞補 ${s + 1} 次後應仍合法`);
       }
     }
   });
 
-  test('抽樣均勻：不同 RNG 必須抽到不同答案鍵', () => {
+  test('抽樣均勻：分布不得偏斜', () => {
     need();
-    // 決定性實作（取 pool 第一個合格者）在這裡只會產生 1 個相異值
+    // 相異值多只證明「不是決定性實作」，擋不掉高度偏斜（覆審 v3.5 2.1）。
+    // 因此同時斷言最高頻上限：候選約 3,000 鍵、抽 1,200 次，
+    // 均勻下期望每鍵 0.4 次，Poisson 上尾使最高頻幾乎不可能超過 8。
+    const N = 1200;
     const qs = quiz(Level.L1, 2104);
     const el = eligibleKeys(index(), Level.L1);
-    const got = new Set();
-    for (let s = 0; s < 60; s++) {
+    const rng = makeRng(7000);                          // 連續序列，不是每次重置
+    const freq = new Map();
+    for (let s = 0; s < N; s++) {
       const sp = drawSpareQuestion({
-        index: index(), level: Level.L1, eligible: el, questions: qs,
-        token: 1, rng: makeRng(7000 + s),
+        index: index(), level: Level.L1, eligible: el, questions: qs, token: 1, rng,
       });
-      got.add(sp.item.ans);
+      freq.set(sp.item.ans, (freq.get(sp.item.ans) || 0) + 1);
     }
-    assert.ok(got.size >= 20, `60 次遞補只抽到 ${got.size} 個相異答案鍵，抽樣不均`);
+    const top = Math.max(...freq.values());
+    assert.ok(freq.size >= N * 0.7,
+      `${N} 次遞補只抽到 ${freq.size} 個相異答案鍵，抽樣不均`);
+    assert.ok(top <= 8, `單一答案鍵被抽中 ${top} 次，分布偏斜`);
   });
 
   test('無可用候選 → null（呼叫端中止，不得回傳不合法題目）', () => {
@@ -887,10 +893,17 @@ describe('A22 整卷不變量 validator', () => {
     need();
     for (const level of [Level.L1, Level.L2, Level.L3]) {
       for (const seed of [11, 222, 3333]) {
-        assert.deepEqual(validateQuizInvariants(quiz(level, seed), { level }), [],
+        assert.deepEqual(validateQuizInvariants(quiz(level, seed), { level, index: index() }), [],
           `${level} seed ${seed} 不應有違規`);
       }
     }
+  });
+
+  test('選擇題缺 PoolIndex 時不得放行（fail closed）', () => {
+    need();
+    // 少傳一個參數就靜默降級成弱檢查，是這道防線最容易失效的方式
+    const bad = validateQuizInvariants(quiz(Level.L1, 2205), { level: Level.L1 });
+    assert.ok(bad.some((m) => m.startsWith('[I3]')), '缺索引應判為 I3 違規');
   });
 
   const violates = (tag, level, mutate) => {
@@ -898,9 +911,11 @@ describe('A22 整卷不變量 validator', () => {
       need();
       const qs = quiz(level, 2201).map((q) => ({ ...q }));
       mutate(qs);
-      const bad = validateQuizInvariants(qs, { level });
+      const bad = validateQuizInvariants(qs, { level, index: index() });
       assert.ok(bad.length, `${tag} 未被抓到`);
-      assert.ok(bad.some((m) => m.includes(tag)), `違規訊息未標示 ${tag}：${bad.join('；')}`);
+      // 比對前綴而非包含：藥名本身可能含 "H2" 之類的子字串
+      assert.ok(bad.some((m) => m.startsWith(`[${tag}]`)),
+        `違規訊息未標示 ${tag}：${bad.join('；')}`);
     });
   };
 
@@ -924,6 +939,14 @@ describe('A22 整卷不變量 validator', () => {
     opts[slot].id = qs[2].item.id;
     qs[2].options = opts;
   });
+  violates('I3', Level.L1, (qs) => {
+    // 捏造一筆「唯一 id、看起來合法」的紀錄。只驗 id 非空＋不重複的弱實作
+    // 會照樣放行——而「只換 img 不換紀錄」正是 I3 要防的（覆審 v3.5 1.1）
+    const slot = qs[6].answerIdx === 0 ? 1 : 0;
+    const opts = qs[6].options.slice();
+    opts[slot] = { ...opts[slot], id: `${opts[slot].id}-FAKE`, img: 'other.webp' };
+    qs[6].options = opts;
+  });
   violates('H4', Level.L1, (qs) => {
     // 忘記洗牌：正解恆在第 0 格（options 同步搬過去，故 I1 仍成立）
     qs.forEach((q, i) => {
@@ -946,7 +969,8 @@ describe('A22 整卷不變量 validator', () => {
     need();
     const qs = quiz(Level.L2, 2202).map((q) => ({ ...q }));
     qs[0].spares = [...qs[0].spares, ...qs[1].spares];
-    assert.ok(validateQuizInvariants(qs, { level: Level.L2 }).some((m) => m.includes('備援')));
+    assert.ok(validateQuizInvariants(qs, { level: Level.L2, index: index() })
+      .some((m) => m.startsWith('[D15]')));
   });
 
   test('替換消耗備援後不得誤判（上限而非等值）', () => {
@@ -956,13 +980,28 @@ describe('A22 整卷不變量 validator', () => {
     const after = qs.slice();
     after[0] = replaceOption(qs[0], slot);
     assert.equal(after[0].spares.length, 1);
-    assert.deepEqual(validateQuizInvariants(after, { level: Level.L2 }), []);
+    assert.deepEqual(validateQuizInvariants(after, { level: Level.L2, index: index() }), []);
   });
 
-  test('L3 不套用選項相關的不變量', () => {
+  test('L3 不套用選項相關的不變量（含缺索引時）', () => {
     need();
     const qs = quiz(Level.L3, 2204);
     assert.ok(qs.every((q) => q.options === undefined));
     assert.deepEqual(validateQuizInvariants(qs, { level: Level.L3 }), []);
+  });
+
+  test('H4 只是 heuristic：門檻為滿卷，且不宣稱驗證了洗牌', () => {
+    need();
+    // 偽陽性機率在滿卷是 4^-19，題數更少時不夠低，寧可不判（覆審 v3.5 1.2）
+    const qs = quiz(Level.L1, 2206).map((q) => {
+      const opts = q.options.slice();
+      const [c] = opts.splice(q.answerIdx, 1);
+      opts.unshift(c);
+      return { ...q, options: opts, answerIdx: 0 };
+    });
+    assert.ok(validateQuizInvariants(qs, { level: Level.L1, index: index() })
+      .some((m) => m.startsWith('[H4]')), '滿卷應觸發');
+    assert.ok(!validateQuizInvariants(qs.slice(0, QUIZ_SIZE - 1), { level: Level.L1, index: index() })
+      .some((m) => m.startsWith('[H4]')), '未滿卷不得觸發');
   });
 });
