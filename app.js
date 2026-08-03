@@ -9,10 +9,10 @@
  */
 import {
   normalize, squash, judge, makeHint, QUIZ_SIZE,
-  QState, transition, newQuestion, scoreQuiz, HINTED_MARK,
-  Level, CHANCE, CHOICE_COUNT, L2_LOAD_TIMEOUT_MS,
-  buildIndex, eligibleKeys, buildChoices, drawLeveledQuiz, judgeChoice,
-  pickEliminated, replaceOption,
+  QState, transition, scoreQuiz, HINTED_MARK,
+  Level, CHOICE_COUNT, L2_LOAD_TIMEOUT_MS,
+  buildIndex, eligibleKeys, drawLeveledQuiz, judgeChoice,
+  pickEliminated, replaceOption, drawSpareQuestion, validateQuizInvariants,
 } from './engine.js';
 
 const SCHEMA = 1;
@@ -58,7 +58,6 @@ const state = {
   questions: [],
   idx: 0,
   voided: 0,
-  used: new Set(),           // 本回合已用過的答案鍵，遞補時避免重複
   nextToken: 1,              // 題目 token，遞補不重用（規格 D18）
   gridLoaded: new Set(),     // L2 已成功載入的格（ready-gate，規格 D21）
   timers: [],                // L2 各格的載入逾時，換題時必須全部清掉
@@ -191,6 +190,11 @@ function startQuiz() {
       return fatal(`${LEVELS[level].badge}可用答案鍵僅 ${e.available} 個，`
         + `不足 ${e.required ?? QUIZ_SIZE} 個，無法出 ${QUIZ_SIZE} 題。`);
     }
+    if (e.code === 'INVARIANT_VIOLATED') {
+      // 生成路徑違規是程式 bug，不是題庫問題——不要建議使用者改選難度
+      return fatal('題卷未通過不變量驗證，已中止以免出到不可解或會洩題的題目。'
+        + `<br>${escapeHtml(e.violations?.[0] ?? e.message)}<br>請回報此問題。`);
+    }
     if (e.code === 'QUIZ_ASSEMBLY_FAILED') {
       return fatal('無法組出符合條件的題卷（誘答條件過嚴或題庫多樣性不足），已中止。'
         + '<br>請改選其他難度，或回報此問題。');
@@ -201,7 +205,6 @@ function startQuiz() {
   state.quizLevel = level;
   state.idx = 0;
   state.voided = 0;
-  state.used = new Set(state.questions.map((q) => q.item.ans));
   state.nextToken = state.questions.length + 1;
   show($('start'), false);
   show($('result'), false);
@@ -452,41 +455,30 @@ function voidCurrent(reason) {
   if (state.voided > MAX_VOID) {
     return fatal(`已有 ${state.voided} 題因資源載入失敗而作廢，中止本回合以免影響成績判讀。<br>原因：${reason}`);
   }
-  const spare = drawSpare(q.level ?? Level.L3);
+  const level = q.level ?? Level.L3;
+  const spare = drawSpareQuestion({
+    index: state.index,
+    level,
+    eligible: LEVELS[level].choice ? eligibleFor(level) : null,
+    questions: state.questions,
+    token: state.nextToken++,
+    rng: Math.random,
+  });
   if (!spare) {
     return fatal('題庫已無可遞補的題目，中止本回合。');
   }
-  state.used.add(spare.item.ans);
+
+  // 遞補是唯一在執行期改變整卷組成的路徑，因此也是唯一需要事後複驗的地方（D19）。
   state.questions.push(spare);
+  const bad = validateQuizInvariants(state.questions, { level: state.quizLevel });
+  if (bad.length) {
+    state.questions.pop();
+    return fatal('遞補題破壞了題卷不變量，中止本回合以免影響成績判讀。'
+      + `<br>${escapeHtml(bad[0])}`);
+  }
   state.idx++;
   if (state.idx < state.questions.length) renderQuestion();
   else finish();
-}
-
-/**
- * 遞補一題。選擇題的遞補必須連同選項一起重建，
- * 且 H2 要對「目前的正解集合」成立——直接沿用舊選項會讓遞補題洩題。
- */
-function drawSpare(level) {
-  const cfg = LEVELS[level];
-  const eligible = cfg.choice ? eligibleFor(level) : null;
-  for (const it of state.pool.items) {
-    if (state.used.has(it.ans)) continue;
-    if (eligible && !eligible.has(it.ans)) continue;
-    const token = state.nextToken++;
-    if (!cfg.choice) return newQuestion(it, { token, level, chance: 0 });
-    try {
-      const excludeAns = new Set(state.used);
-      excludeAns.add(it.ans);
-      return newQuestion(it, {
-        token, level, chance: CHANCE.FOUR,   // 選擇題遞補仍是四選一
-        ...buildChoices(it, state.index, { level, rng: Math.random, excludeAns }),
-      });
-    } catch (e) {
-      if (e.code !== 'NO_DISTRACTORS') throw e;   // 組不出就換下一筆
-    }
-  }
-  return null;
 }
 
 // ── 作答 ─────────────────────────────────────────────────────────────

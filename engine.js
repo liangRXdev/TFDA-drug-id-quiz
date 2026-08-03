@@ -588,7 +588,7 @@ export function drawLeveledQuiz(items, { level, n = QUIZ_SIZE, rng = Math.random
     const corrects = drawQuiz(pool, n, rng);            // 答案鍵均勻（v2 D5）
     const excludeAns = new Set(corrects.map((c) => c.ans));
     try {
-      return corrects.map((c, i) => newQuestion(c, {
+      const quiz = corrects.map((c, i) => newQuestion(c, {
         token: i + 1,                                    // 遞補不重用（D18）
         level,
         chance: baseChance,
@@ -596,14 +596,165 @@ export function drawLeveledQuiz(items, { level, n = QUIZ_SIZE, rng = Math.random
           ? {}
           : buildChoices(c, idx, { level, rng, excludeAns })),
       }));
+      assertQuizInvariants(quiz, level);                 // D19 最後一步
+      return quiz;
     } catch (e) {
-      if (e.code !== 'NO_DISTRACTORS') throw e;
+      if (e.code !== 'NO_DISTRACTORS') throw e;          // 含 INVARIANT_VIOLATED：重抽只會掩蓋 bug
       last = e;
     }
   }
   const err = new Error(`整卷組裝連續 ${MAX_QUIZ_ATTEMPTS} 次失敗：${last?.message ?? ''}`);
   err.code = 'QUIZ_ASSEMBLY_FAILED';
   throw err;
+}
+
+// ── 整卷不變量與遞補（規格 D19、6.5）─────────────────────────────────
+
+/**
+ * 整卷**已出現過**的答案鍵：正解 ∪ 選項 ∪ 備援。
+ *
+ * 遞補題的正解要避開的是這個集合，不是只有正解集合——見 `drawSpareQuestion`。
+ */
+export function seenAnsKeys(questions) {
+  const out = new Set();
+  for (const q of questions) {
+    out.add(q.item.ans);
+    for (const o of q.options || []) out.add(o.ans);
+    for (const s of q.spares || []) out.add(s.ans);
+  }
+  return out;
+}
+
+/**
+ * D19 的最後一道防線：對整卷驗證 H1–H4 與 I1／I3／I5。
+ *
+ * 測試全綠不等於這道檢查存在。它守的是**執行期才組出來的題卷**——
+ * 尤其是遞補後才成形的組合，那是測試無法窮舉的路徑。
+ *
+ * 回傳違規描述而不直接拋出：呼叫端對「生成時違規」（bug，中止）與
+ * 「遞補後違規」（中止本回合並告知使用者）要有不同處置。
+ *
+ * @returns {string[]} 空陣列表示通過
+ */
+export function validateQuizInvariants(questions, { level } = {}) {
+  const bad = [];
+  const lvl = level ?? questions[0]?.level ?? Level.L3;
+  const tokens = new Set();
+  const corrects = new Set();
+
+  questions.forEach((q, i) => {
+    const at = `第 ${i + 1} 題`;
+    // I5：題目 token 全卷唯一。遞補會使題號位移，token 是唯一穩定的身分
+    if (!Number.isInteger(q.token)) bad.push(`${at}：缺少題目 token（I5）`);
+    else if (tokens.has(q.token)) bad.push(`${at}：題目 token ${q.token} 重複（I5）`);
+    tokens.add(q.token);
+    // H1（卷層級）：正解答案鍵兩兩相異
+    if (corrects.has(q.item.ans)) bad.push(`${at}：正解答案鍵 ${q.item.ans} 重複（H1）`);
+    corrects.add(q.item.ans);
+  });
+
+  if (lvl === Level.L3) return bad;                      // 無選項，其餘不變量不適用
+
+  const maxSpares = lvl === Level.L2 ? DISTRACTOR_COUNT - (CHOICE_COUNT - 1) : 0;
+  questions.forEach((q, i) => {
+    const at = `第 ${i + 1} 題`;
+    const opts = q.options || [];
+    if (opts.length !== CHOICE_COUNT) {
+      bad.push(`${at}：選項數 ${opts.length} ≠ ${CHOICE_COUNT}`);
+      return;
+    }
+    if (!Number.isInteger(q.answerIdx) || q.answerIdx < 0 || q.answerIdx >= CHOICE_COUNT) {
+      bad.push(`${at}：answerIdx ${q.answerIdx} 超出範圍`);
+    } else if (opts[q.answerIdx] !== q.item) {
+      // I1：必須是 correctItem **本身**。同 ans 的另一筆紀錄會讓題幹與正解格
+      // 來自不同照片，畫面上看不出來，但 L2 直接變成不可解
+      bad.push(`${at}：answerIdx 未指向 correctItem 本身（I1）`);
+    }
+
+    const spares = q.spares || [];
+    // 上限而非等值：替換消耗備援後，同一卷的舊題會少於初始值
+    if (spares.length > maxSpares) bad.push(`${at}：備援 ${spares.length} 個超過上限 ${maxSpares}`);
+
+    const all = [...opts, ...spares];
+    const ids = new Set();
+    for (const r of all) {
+      // I3：每個選項／備援都保有原始紀錄身分
+      if (!r || !r.id) { bad.push(`${at}：選項缺少紀錄身分 id（I3）`); continue; }
+      if (ids.has(r.id)) bad.push(`${at}：同題重複紀錄 ${r.id}（I3）`);
+      ids.add(r.id);
+    }
+    for (let a = 0; a < all.length; a++) {
+      const x = all[a];
+      if (!x?.id) continue;
+      // H2：誘答與備援不得屬於本卷正解集合（本題正解除外）
+      if (x !== q.item && corrects.has(x.ans)) {
+        bad.push(`${at}：誘答 ${x.ans} 屬於本卷正解集合（H2）`);
+      }
+      for (let b = a + 1; b < all.length; b++) {
+        const y = all[b];
+        if (!y?.id) continue;
+        if (x.ans === y.ans) bad.push(`${at}：答案鍵 ${x.ans} 重複（H1）`);
+        else if (nameCollides(x.ans, y.ans)) bad.push(`${at}：${x.ans} 與 ${y.ans} 名稱過近（H3）`);
+        if (lvl === Level.L2 && l2Key(x) === l2Key(y)) bad.push(`${at}：${x.ans} 與 ${y.ans} 的 L2key 碰撞（D12）`);
+      }
+    }
+  });
+
+  // H4：無法事後驗「有沒有洗牌」，但「整卷正解恆在同一格」正是忘記洗牌
+  // 唯一會產生的樣態。20 題下誤判機率 4^-19，可以當硬條件。
+  if (questions.length >= 10) {
+    const slots = new Set(questions.map((q) => q.answerIdx));
+    if (slots.size === 1) bad.push(`整卷正解恆在第 ${[...slots][0]} 格，未經洗牌（H4）`);
+  }
+  return bad;
+}
+
+/** 生成路徑的硬中止：不變量違規是 bug，重抽只會把它變成偶發 */
+function assertQuizInvariants(quiz, level) {
+  const bad = validateQuizInvariants(quiz, { level });
+  if (!bad.length) return;
+  const err = new Error(`整卷不變量驗證失敗：${bad.join('；')}`);
+  err.code = 'INVARIANT_VIOLATED';
+  err.violations = bad;
+  throw err;
+}
+
+/**
+ * 遞補一題（規格 6.5）。
+ *
+ * 遞補的正解必須避開**整卷已出現過的所有答案鍵**——正解、選項、備援都算。
+ * 只避開正解集合時，遞補題的正解可以是早先某題的誘答，於是那一題的 H2
+ * 被**回溯破壞**（同一個藥名既是甲題的誘答又是乙題的正解），正是 D19 要防的失效。
+ *
+ * 抽樣在**答案鍵層級均勻**（v2 D5）：按 pool 順序取第一個合格者是決定性的，
+ * 會讓題庫前段的答案鍵在遞補時被系統性高估。
+ *
+ * @param {Set} [eligible] 該級可用答案鍵；省略表示全部可用（L3）
+ * @returns {object|null} 無可用候選時回傳 null（呼叫端應中止本回合）
+ */
+export function drawSpareQuestion({ index, level, eligible, questions, token, rng = Math.random }) {
+  const seen = seenAnsKeys(questions);
+  const keys = index.keys.filter((ans) => !seen.has(ans) && (!eligible || eligible.has(ans)));
+  shuffle(keys, rng);                                    // filter 已複製，未動索引（D20）
+
+  for (const ans of keys) {
+    const it = pick(index.byAns.get(ans), rng);          // 該鍵紀錄內也均勻
+    if (level === Level.L3) return newQuestion(it, { token, level, chance: CHANCE.NONE });
+    // H2 的 excludeAns 是「整卷正解集合」，含這題自己的正解
+    const excludeAns = new Set(questions.map((q) => q.item.ans));
+    excludeAns.add(ans);
+    try {
+      return newQuestion(it, {
+        token,
+        level,
+        chance: CHANCE.FOUR,                             // 選擇題遞補仍是四選一
+        ...buildChoices(it, index, { level, rng, excludeAns }),
+      });
+    } catch (e) {
+      if (e.code !== 'NO_DISTRACTORS') throw e;          // 組不出就換下一個答案鍵
+    }
+  }
+  return null;
 }
 
 /**

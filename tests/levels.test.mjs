@@ -19,6 +19,7 @@ import {
   Level, CHOICE_COUNT, DISTRACTOR_COUNT, CHANCE, MAX_QUIZ_ATTEMPTS,
   nameCollides, buildIndex, eligibleKeys, buildChoices, drawLeveledQuiz, judgeChoice,
   l2Key, strictlyEligibleL2, pickEliminated, replaceOption,
+  drawSpareQuestion, seenAnsKeys, validateQuizInvariants,
 } from '../engine.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -762,5 +763,206 @@ describe('A15 L2 提示', () => {
     const locked = transition(q, { type: 'submit', correct: false });
     assert.equal(transition(locked, { type: 'hint' }).mark, HINTED_MARK);
     assert.equal(transition(locked, { type: 'hint' }).state, QState.LOCKED);
+  });
+});
+
+// ══ A21 — 遞補（D19 + 6.5）════════════════════════════════════════════
+// 〔堵〕遞補只避開正解集合（正解可以是別題的誘答，回溯破壞那題的 H2）；
+//       按 pool 順序取第一個合格者（決定性，違反 v2 D5 的答案鍵均勻）；
+//       沿用作廢題的選項；token 重用。
+describe('A21 遞補', () => {
+  const quiz = (level, seed) =>
+    drawLeveledQuiz(ITEMS, { level, rng: makeRng(seed), index: index() });
+
+  test('遞補正解不得是任何現存題目的正解、選項或備援', () => {
+    need();
+    for (const level of [Level.L1, Level.L2]) {
+      const qs = quiz(level, 2101);
+      const el = eligibleKeys(index(), level);
+      const seen = seenAnsKeys(qs);
+
+      // 只用正解集合當屏障時，這裡就會抽到別題的誘答
+      const onlyCorrects = new Set(qs.map((q) => q.item.ans));
+      assert.ok(seen.size > onlyCorrects.size,
+        '整卷已出現的答案鍵必須多於正解集合，否則這條測試沒有鑑別力');
+
+      for (let s = 0; s < 40; s++) {
+        const sp = drawSpareQuestion({
+          index: index(), level, eligible: el, questions: qs,
+          token: 999 + s, rng: makeRng(4000 + s),
+        });
+        assert.ok(sp, '應能遞補');
+        assert.ok(!seen.has(sp.item.ans),
+          `${level} 遞補正解 ${sp.item.ans} 已在本卷出現過（回溯破壞 H2）`);
+      }
+    }
+  });
+
+  test('遞補題本身滿足全部同題不變量', () => {
+    need();
+    for (const level of [Level.L1, Level.L2]) {
+      const qs = quiz(level, 2102);
+      const el = eligibleKeys(index(), level);
+      for (let s = 0; s < 12; s++) {
+        const sp = drawSpareQuestion({
+          index: index(), level, eligible: el, questions: qs,
+          token: 900 + s, rng: makeRng(5000 + s),
+        });
+        const others = new Set(qs.map((q) => q.item.ans));   // 遞補題自己的正解不在其中
+        assertChoiceInvariants(sp, sp.item, level, others);
+        assert.equal(sp.chance, CHANCE.FOUR, '遞補仍是四選一');
+        assert.equal(sp.state, QState.PENDING);
+        assert.equal(sp.token, 900 + s, '呼叫端指定的 token 必須被採用');
+      }
+    }
+  });
+
+  test('遞補後整卷仍通過不變量驗證', () => {
+    need();
+    for (const level of [Level.L1, Level.L2, Level.L3]) {
+      const qs = quiz(level, 2103);
+      const el = level === Level.L3 ? null : eligibleKeys(index(), level);
+      const paper = qs.slice();
+      for (let s = 0; s < 3; s++) {
+        const sp = drawSpareQuestion({
+          index: index(), level, eligible: el, questions: paper,
+          token: paper.length + 1, rng: makeRng(6000 + s),
+        });
+        assert.ok(sp);
+        paper.push(sp);
+        assert.deepEqual(validateQuizInvariants(paper, { level }), [],
+          `${level} 連續遞補 ${s + 1} 次後應仍合法`);
+      }
+    }
+  });
+
+  test('抽樣均勻：不同 RNG 必須抽到不同答案鍵', () => {
+    need();
+    // 決定性實作（取 pool 第一個合格者）在這裡只會產生 1 個相異值
+    const qs = quiz(Level.L1, 2104);
+    const el = eligibleKeys(index(), Level.L1);
+    const got = new Set();
+    for (let s = 0; s < 60; s++) {
+      const sp = drawSpareQuestion({
+        index: index(), level: Level.L1, eligible: el, questions: qs,
+        token: 1, rng: makeRng(7000 + s),
+      });
+      got.add(sp.item.ans);
+    }
+    assert.ok(got.size >= 20, `60 次遞補只抽到 ${got.size} 個相異答案鍵，抽樣不均`);
+  });
+
+  test('無可用候選 → null（呼叫端中止，不得回傳不合法題目）', () => {
+    need();
+    const qs = quiz(Level.L1, 2105);
+    // 可用集合全部已出現過 → 沒有任何候選
+    const el = new Set(qs.map((q) => q.item.ans));
+    assert.equal(drawSpareQuestion({
+      index: index(), level: Level.L1, eligible: el, questions: qs,
+      token: 1, rng: makeRng(1),
+    }), null);
+  });
+
+  test('L3 遞補不帶選項', () => {
+    need();
+    const qs = quiz(Level.L3, 2106);
+    const sp = drawSpareQuestion({
+      index: index(), level: Level.L3, questions: qs, token: 21, rng: makeRng(8),
+    });
+    assert.ok(sp);
+    assert.equal(sp.options, undefined, 'L3 不得有選項');
+    assert.equal(sp.chance, CHANCE.NONE, 'L3 亂猜基線為 0');
+    assert.equal(sp.mark, FULL_MARK);
+  });
+});
+
+// ══ A22 — 整卷不變量 validator（D19 最後一步）══════════════════════════
+// 〔堵〕validator 直接 `return []`（永遠通過）；只檢查題數；
+//       只檢查 ans 相等而漏掉 I1 的紀錄身分。
+describe('A22 整卷不變量 validator', () => {
+  const quiz = (level, seed) =>
+    drawLeveledQuiz(ITEMS, { level, rng: makeRng(seed), index: index() });
+
+  test('三級的正常題卷皆回傳空陣列', () => {
+    need();
+    for (const level of [Level.L1, Level.L2, Level.L3]) {
+      for (const seed of [11, 222, 3333]) {
+        assert.deepEqual(validateQuizInvariants(quiz(level, seed), { level }), [],
+          `${level} seed ${seed} 不應有違規`);
+      }
+    }
+  });
+
+  const violates = (tag, level, mutate) => {
+    test(`抓得到違規：${tag}`, () => {
+      need();
+      const qs = quiz(level, 2201).map((q) => ({ ...q }));
+      mutate(qs);
+      const bad = validateQuizInvariants(qs, { level });
+      assert.ok(bad.length, `${tag} 未被抓到`);
+      assert.ok(bad.some((m) => m.includes(tag)), `違規訊息未標示 ${tag}：${bad.join('；')}`);
+    });
+  };
+
+  violates('H1', Level.L1, (qs) => { qs[3].item = qs[7].item; });
+  violates('I5', Level.L1, (qs) => { qs[5].token = qs[2].token; });
+  violates('H2', Level.L1, (qs) => {
+    // 把別題的正解紀錄塞進誘答格——這正是舊 drawSpare 會造成的狀態
+    const slot = qs[0].answerIdx === 0 ? 1 : 0;
+    const opts = qs[0].options.slice();
+    opts[slot] = qs[9].item;
+    qs[0].options = opts;
+  });
+  violates('I1', Level.L1, (qs) => {
+    // answerIdx 仍在範圍內、options 仍是 4 個合法紀錄，只是指錯格
+    qs[1].answerIdx = (qs[1].answerIdx + 1) % CHOICE_COUNT;
+  });
+  violates('I3', Level.L2, (qs) => {
+    const slot = qs[2].answerIdx === 0 ? 1 : 0;
+    const opts = qs[2].options.slice();
+    opts[slot] = { ...qs[2].options[slot] };            // 同一 id 的另一個物件
+    opts[slot].id = qs[2].item.id;
+    qs[2].options = opts;
+  });
+  violates('H4', Level.L1, (qs) => {
+    // 忘記洗牌：正解恆在第 0 格（options 同步搬過去，故 I1 仍成立）
+    qs.forEach((q, i) => {
+      const opts = q.options.slice();
+      const [c] = opts.splice(q.answerIdx, 1);
+      opts.unshift(c);
+      qs[i].options = opts;
+      qs[i].answerIdx = 0;
+    });
+  });
+  violates('H3', Level.L1, (qs) => {
+    const slot = qs[4].answerIdx === 0 ? 1 : 0;
+    const opts = qs[4].options.slice();
+    const near = opts[slot === 0 ? 1 : 0];
+    opts[slot] = { ...near, id: `${near.id}-x`, ans: `${near.ans}S` };   // 前綴包含
+    qs[4].options = opts;
+  });
+
+  test('備援數超過上限會被抓到', () => {
+    need();
+    const qs = quiz(Level.L2, 2202).map((q) => ({ ...q }));
+    qs[0].spares = [...qs[0].spares, ...qs[1].spares];
+    assert.ok(validateQuizInvariants(qs, { level: Level.L2 }).some((m) => m.includes('備援')));
+  });
+
+  test('替換消耗備援後不得誤判（上限而非等值）', () => {
+    need();
+    const qs = quiz(Level.L2, 2203);
+    const slot = qs[0].answerIdx === 0 ? 1 : 0;
+    const after = qs.slice();
+    after[0] = replaceOption(qs[0], slot);
+    assert.equal(after[0].spares.length, 1);
+    assert.deepEqual(validateQuizInvariants(after, { level: Level.L2 }), []);
+  });
+
+  test('L3 不套用選項相關的不變量', () => {
+    need();
+    const qs = quiz(Level.L3, 2204);
+    assert.ok(qs.every((q) => q.options === undefined));
+    assert.deepEqual(validateQuizInvariants(qs, { level: Level.L3 }), []);
   });
 });
