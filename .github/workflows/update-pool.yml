@@ -33,7 +33,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # 不可降回 20：`node --test` 的 glob 展開是 Node 21 才有的。
+          # Node 20 會把 `tests/**/*.test.mjs` 當字面路徑，
+          # 於是「測試找不到檔案」被當成「題庫沒過驗收」——2026-08-01 的假警報。
+          node-version: '24'
 
       - uses: astral-sh/setup-uv@v5
 

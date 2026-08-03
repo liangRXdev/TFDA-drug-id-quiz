@@ -1,6 +1,8 @@
 # CLAUDE.md — 藥品辨識王
 
-規格是 `.ai-review/plan.md`（v2，已過 `/codex-checkplan`）。**動前端或管線前先讀它**，
+規格有兩份，**動前端或管線前先讀**：`.ai-review/plan.md`（v2，資料管線與 L3）
+與 `.ai-review/plan-v3-levels.md`（v3.6，難度分級；不變量 H1–H4／I1–I5 與其**分層**
+寫在 D18／D19，動抽題或選項生成一定要先讀那兩節）。
 底下只記「從 code 看不出來、但改錯會出事」的部分。
 
 ## 資料源的三個坑（實測，別重踩）
@@ -56,7 +58,7 @@ house style 的「全部工具都是 PWA」對本專案不適用。
 ## 指令
 
 ```bash
-npm test                 # engine + 題庫驗收（A 組，39 項）
+npm test                 # engine + 難度分級 + UI 接線（139 項）；需 Node ≥22（glob）
 npm run build:pool       # 抓來源 → 產 data/pool.json
 npm run fetch:images     # 鏡像圖片（uv + Pillow）
 npm run verify           # 資料完整性（B 組）

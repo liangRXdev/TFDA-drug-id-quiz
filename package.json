@@ -11,6 +11,6 @@
     "verify": "node tools/verify-data.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   }
 }
