@@ -28,17 +28,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 330        # 低於 Actions 單 job 6 小時上限
 
+    # 所有 action 一律釘 40 碼 commit SHA，不用可變動的 tag。
+    # 這個 job 有 `contents: write` 並會把產出的題庫推回 main——
+    # tag 可以被上游改指向，等於讓第三方在我們的發布路徑上獲得任意程式碼執行。
+    # 尾註的版本號只是給人看的，權威是 SHA。升版時一起改兩者。
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           # 不可降回 20：`node --test` 的 glob 展開是 Node 21 才有的。
           # Node 20 會把 `tests/**/*.test.mjs` 當字面路徑，
           # 於是「測試找不到檔案」被當成「題庫沒過驗收」——2026-08-01 的假警報。
           node-version: '24'
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86   # v5.4.2
+        with:
+          # 釘住 action 卻讓它去抓「最新的 uv」，等於留著同一個入口：
+          # 解析與安裝 Python 依賴的就是這支執行檔
+          version: '0.11.8'
 
       # ── 建置題庫 ────────────────────────────────────────────────
       # 任一驗證失敗即 exit 1，data/ 不變（規格 D9 全有全無、B1）
@@ -49,9 +57,14 @@ jobs:
 
       # ── 鏡像圖片 ────────────────────────────────────────────────
       # 暫時性下載失敗重試 3 次後仍失敗 → 整批中止，不得用刪題吸收（規格 B8）
+      #
+      # `--locked` 強制照 tools/fetch-images.py.lock 安裝（含傳遞依賴與 sha256）。
+      # 少了它，PEP 723 的 `pillow>=10` 會在每次排程解析成當下最新版——
+      # 圖片解碼與寫檔就在這一步，供應鏈換版即可影響寫進 repo 的資產。
+      # 依賴有變動時跑 `uv lock --script tools/fetch-images.py` 更新 lock。
       - name: 鏡像圖片
         run: |
-          uv run tools/fetch-images.py --workers 12 \
+          uv run --locked --script tools/fetch-images.py --workers 12 \
             ${{ inputs.verify_all && '--verify-all' || '' }}
 
       # ── 驗收 ────────────────────────────────────────────────────
@@ -102,7 +115,7 @@ jobs:
       # 變動幅度超標時 build-pool 會 exit 1；開 issue 交人工裁決（規格 D9／4-2）
       - name: 失敗時開 issue
         if: failure() && github.event_name == 'schedule'
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b   # v7.1.0
         with:
           script: |
             const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;

@@ -118,8 +118,13 @@ validator 實際只驗得到其中一層；I3 只驗 `id` 非空，捏造唯一 
 
 **另案（非本分支造成）**
 
-- [ ] #19 `update-pool.yml` 的 Actions 固定完整 SHA、鎖 Pillow/requests 版本
-      ——`main` 既有的供應鏈入口風險，下次自動題庫更新前處理
+- [x] #19 `update-pool.yml` 的 Actions 固定完整 SHA、鎖 Pillow/requests 版本
+      —— 2026-08-03 完成。四個 action 釘 40 碼 SHA（皆為現行 major 的最新 patch，
+      與 2026-08-01 實跑解析到的 SHA 相同，因此行為中性）；Python 依賴改用
+      `uv lock --script` 產生的 `tools/fetch-images.py.lock`（6 個套件含傳遞依賴、
+      帶 sha256），CI 與 `npm run fetch:images` 都走 `uv run --locked --script`；
+      連 uv 執行檔本身也釘版本。**未做**：跨 major 升級（checkout v7／setup-node v7／
+      github-script v9），那會改變行為且無法在不實跑整條管線的前提下驗證，另案
 
 **不處理**
 

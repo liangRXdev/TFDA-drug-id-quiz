@@ -7,7 +7,7 @@
   "scripts": {
     "test": "node --test \"tests/**/*.test.mjs\"",
     "build:pool": "node tools/build-pool.mjs",
-    "fetch:images": "uv run --with pillow --with requests tools/fetch-images.py",
+    "fetch:images": "uv run --locked --script tools/fetch-images.py",
     "verify": "node tools/verify-data.mjs"
   },
   "engines": {
