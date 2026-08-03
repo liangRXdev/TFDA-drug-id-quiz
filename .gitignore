@@ -3,3 +3,6 @@ node_modules/
 *.log
 tmp/
 fetch.log
+
+# G1 gate 樣本為產生物，2MB 且可由 g1-sample.mjs 以固定 seed 重現
+.ai-review/g1-sample.html
