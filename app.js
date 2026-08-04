@@ -13,10 +13,17 @@ import {
   Level, CHOICE_COUNT, L2_LOAD_TIMEOUT_MS,
   buildIndex, eligibleKeys, drawLeveledQuiz, judgeChoice,
   pickEliminated, replaceOption, drawSpareQuestion, validateQuizInvariants,
+  DECK_SIZE, buildLookAlikeIndex, lookAlikesOf, flipCard, drawDeck, drawSpareCard,
 } from './engine.js';
 
 const SCHEMA = 1;
 const MAX_VOID = 3;          // 規格 6.5：遞補失敗次數上限
+/**
+ * 閃卡連續遞補上限。**與測驗的 MAX_VOID 意義不同**——測驗超過就中止回合，
+ * 因為作廢會扭曲分母；閃卡不計分，沒有分母可扭曲，超過只代表「圖大概載不動」，
+ * 因此是問使用者要不要繼續，而不是替他決定收工（F5）。
+ */
+const MAX_FLASH_FAIL = 3;
 /** pool.json 內的 img 路徑是相對於 data/，不是相對於頁面 */
 const DATA_DIR = 'data/';
 
@@ -61,6 +68,14 @@ const state = {
   nextToken: 1,              // 題目 token，遞補不重用（規格 D18）
   gridLoaded: new Set(),     // L2 已成功載入的格（ready-gate，規格 D21）
   timers: [],                // L2 各格的載入逾時，換題時必須全部清掉
+
+  // 閃卡（獨立於測驗的狀態，不共用 questions／idx——共用會讓
+  // 「閃完一疊再去測驗」把閃卡殘留的索引帶進成績頁）
+  lookAlike: null,           // 外觀重複索引，第一次進閃卡才建
+  deck: [],
+  fIdx: 0,
+  fFails: 0,                 // 本疊累計遞補次數，使用者按「繼續」後歸零
+  fNextToken: 0,
 };
 
 // ── 載入題庫（失敗路徑見規格 C4）──────────────────────────────────────
@@ -71,6 +86,8 @@ function fatal(msg) {
   show($('start'), false);
   show($('quiz'), false);
   show($('result'), false);
+  show($('flash'), false);
+  show($('flashDone'), false);
 }
 
 async function loadPool() {
@@ -116,6 +133,7 @@ async function loadPool() {
   show($('start'));
   $('qTotal').textContent = QUIZ_SIZE;
   $('introN').textContent = QUIZ_SIZE;
+  $('fTotal').textContent = DECK_SIZE;
 }
 
 // ── 難度選擇（規格 §6.1）─────────────────────────────────────────────
@@ -594,6 +612,175 @@ function next() {
   else renderQuestion();
 }
 
+// ── 快速閃卡（不計分，F1–F6）─────────────────────────────────────────
+
+/** 外觀重複索引建一次就好（3,913 筆掃描，別每疊重算） */
+function lookAlikeIndex() {
+  if (!state.lookAlike) state.lookAlike = buildLookAlikeIndex(state.pool.items);
+  return state.lookAlike;
+}
+
+function startFlash() {
+  try {
+    state.deck = drawDeck(state.pool.items, { n: DECK_SIZE, rng: Math.random });
+  } catch (e) {
+    if (e.code === 'INSUFFICIENT_KEYS') {
+      return fatal(`題庫相異品名僅 ${e.available} 個，不足 ${DECK_SIZE} 張，無法組成一疊閃卡。`);
+    }
+    return fatal(`閃卡抽取失敗：${e.message}`);
+  }
+  state.fIdx = 0;
+  state.fFails = 0;
+  state.fNextToken = state.deck.length + 1;
+
+  show($('start'), false);
+  show($('result'), false);
+  show($('quiz'), false);
+  show($('flashDone'), false);
+  show($('flash'));
+  renderCard();
+}
+
+function renderCard() {
+  const card = state.deck[state.fIdx];
+  const it = card.item;
+
+  $('fIdx').textContent = state.fIdx + 1;
+  $('fBar').style.width = `${(state.fIdx / DECK_SIZE) * 100}%`;
+
+  // 背面在翻面前必須是真的空的。留著上一張的內容再用 hidden 蓋住，
+  // 等於把答案放在 DOM 裡讓讀屏與檢視原始碼看得到（F3）
+  $('fBack').innerHTML = '';
+  show($('fBack'), false);
+  show($('btnFlip'));
+  $('btnFlip').disabled = false;
+  show($('btnFlashNext'), false);
+  show($('fWarnBox'), false);
+
+  // 圖片失敗守門與測驗同一套：token + src 三段比對，避免舊圖的遲到 onerror
+  // 換掉無辜的新卡（規格 D18／覆審 C5）
+  const img = $('fImg');
+  const myToken = card.token;
+  const expected = DATA_DIR + it.img;
+  img.onerror = () => {
+    const cur = state.deck[state.fIdx];
+    if (!cur || cur.token !== myToken || img.getAttribute('src') !== expected) return;
+    replaceCard('圖片載入失敗');
+  };
+  img.alt = `藥品外觀實拍圖：${it.shape.join('／')}、${it.color.join('／')}`;
+  img.setAttribute('src', expected);
+  img.src = expected;
+
+  $('fFeatures').innerHTML =
+    featureCell('形狀', it.shape.join('／'))
+    + featureCell('顏色', it.color.join('／'), it.color.length > 1 ? '多層／膠囊帽身' : '')
+    + featureCell('刻痕', it.score_mark.join('／'))
+    + featureCell('外觀尺寸', it.size ? `${it.size} mm` : '—')
+    + featureCell('標記一', it.mark1)
+    + (it.mark2 ? featureCell('標記二', it.mark2) : '');
+
+  $('btnFlip').focus();
+}
+
+/**
+ * 翻面。狀態走 `flipCard` 而不是只改 DOM——重複點擊必須是同一張卡，
+ * 否則「已翻面」這件事只存在畫面上，遞補路徑無從得知。
+ */
+function flip() {
+  const card = state.deck[state.fIdx];
+  if (!card || card.flipped) return;
+  state.deck[state.fIdx] = flipCard(card);
+
+  const it = card.item;
+  const alts = lookAlikesOf(it, lookAlikeIndex());
+
+  // 相似品項清單是本模式最重要的一段。少列了，使用者會建立
+  // 「這個外觀＝這顆藥」的錯誤唯一對應，那正是閃卡最主要的失效模式（F3）
+  const altBlock = alts.length ? `
+    <div class="look-alike">
+      <div class="lead">⚠ 這個外觀不只一種藥（另有 ${alts.length} 種品名）</div>
+      <ul>${alts.map((a) => `<li>${escapeHtml(a)}</li>`).join('')}</ul>
+      <div class="note">以照片可見的特徵（形狀／顏色／標記）判斷時，這些品項無法區分。
+        實務辨識請以包裝標籤與院內品項資料為準。</div>
+    </div>` : '';
+
+  $('fBack').innerHTML = `
+    <div class="ans">${escapeHtml(it.ans)}</div>
+    <div class="full">${escapeHtml(it.full)}</div>
+    ${it.zh ? `<div class="zh">${escapeHtml(it.zh)}</div>` : ''}
+    <div class="lic">${escapeHtml(it.id)}</div>
+    ${altBlock}`;
+  show($('fBack'));
+
+  show($('btnFlip'), false);
+  const last = state.fIdx + 1 >= state.deck.length;
+  $('btnFlashNext').textContent = last ? '看完了' : '下一張';
+  show($('btnFlashNext'));
+  $('btnFlashNext').focus();
+}
+
+function nextCard() {
+  state.fIdx++;
+  if (state.fIdx >= state.deck.length) finishFlash();
+  else renderCard();
+}
+
+/**
+ * 圖片載不出來就換一張，不留空卡（F4）。
+ *
+ * 本疊**累計**失敗達 `MAX_FLASH_FAIL` 就停下來問使用者——刻意不採「連續失敗」，
+ * 零星散落的失敗同樣代表圖源有問題，只是不會連號出現。沒有這道閘，
+ * 離線或圖床掛掉時會把整疊安靜換完，使用者只看到卡片一直跳。
+ */
+function replaceCard(reason) {
+  const token = state.fNextToken++;
+  const spare = drawSpareCard({ index: state.index, deck: state.deck, token, rng: Math.random });
+  if (!spare) {
+    return finishFlash('題庫已無可替換的品項，本疊提前結束。');
+  }
+  state.deck[state.fIdx] = spare;
+  state.fFails++;
+
+  if (state.fFails >= MAX_FLASH_FAIL) {
+    $('fImg').removeAttribute('src');          // 停在警示畫面時不要繼續打圖床
+    $('fWarnMsg').textContent =
+      `已有 ${state.fFails} 張圖片載入失敗（最近一次：${reason}）。`
+      + '可能是網路不穩或圖檔缺漏。要繼續看這疊嗎？';
+    show($('fWarnBox'));
+    show($('btnFlip'), false);
+    show($('btnFlashNext'), false);
+    $('btnFlashResume').focus();
+    return;
+  }
+  renderCard();
+}
+
+/** 使用者選擇繼續：計數歸零，否則下一張失敗就會立刻再跳一次警示 */
+function resumeFlash() {
+  state.fFails = 0;
+  show($('fWarnBox'), false);
+  renderCard();
+}
+
+function finishFlash(note = '') {
+  const flipped = state.deck.filter((c) => c.flipped).length;
+  const withAlts = state.deck.filter((c) => lookAlikesOf(c.item, lookAlikeIndex()).length).length;
+
+  show($('flash'), false);
+  show($('flashDone'));
+  $('flashDoneSub').textContent =
+    (note ? `${note}　` : '')
+    + `本疊 ${state.deck.length} 張，翻開 ${flipped} 張`
+    + (withAlts ? `　·　其中 ${withAlts} 張的外觀另有相似品項` : '')
+    + '　·　閃卡不計分，成績請走測驗模式。';
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function quitFlash() {
+  $('fImg').removeAttribute('src');
+  finishFlash();
+}
+
 // ── 成績 ─────────────────────────────────────────────────────────────
 
 function finish() {
@@ -788,6 +975,8 @@ function escapeHtml(s) {
 function backToStart() {
   show($('result'), false);
   show($('quiz'), false);
+  show($('flash'), false);
+  show($('flashDone'), false);
   show($('start'));
   resetLevel();                 // 每回合都必須重新選級別（規格 §6.1）
   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -807,5 +996,18 @@ $('btnDownload').addEventListener('click', () => {
 $('qInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); submit(); }
 });
+
+// 閃卡。btnFlash 不看 state.level——閃卡沒有難度可言（F1）
+$('btnFlash').addEventListener('click', startFlash);
+$('btnFlip').addEventListener('click', flip);
+$('btnFlashNext').addEventListener('click', nextCard);
+$('btnFlashQuit').addEventListener('click', quitFlash);
+$('btnFlashResume').addEventListener('click', resumeFlash);
+$('btnFlashStop').addEventListener('click', () => {
+  $('fImg').removeAttribute('src');
+  finishFlash('已結束這疊。');
+});
+$('btnToQuiz').addEventListener('click', backToStart);
+$('btnFlashAgain').addEventListener('click', startFlash);
 
 loadPool();

@@ -202,6 +202,29 @@ input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow:
 .review .vd { color: var(--text-muted); }
 .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 
+/* 快速閃卡 */
+.flash-back {
+  margin-top: 1.1rem; border: 1px solid var(--accent); background: var(--accent-light);
+  border-radius: 6px; padding: 0.9rem 1rem;
+}
+.flash-back .ans {
+  font-family: var(--mono); font-size: 1.5rem; font-weight: 700; line-height: 1.3;
+  color: var(--accent); word-break: break-word;
+}
+.flash-back .full { font-family: var(--mono); font-size: 0.82rem; margin-top: 0.35rem; word-break: break-word; }
+.flash-back .zh { font-size: 0.82rem; color: var(--text-muted); margin-top: 0.15rem; }
+.flash-back .lic { font-family: var(--mono); font-size: 0.72rem; color: var(--text-muted); margin-top: 0.3rem; }
+.look-alike { margin-top: 0.85rem; border-top: 1px dashed var(--warning); padding-top: 0.65rem; }
+.look-alike .lead { font-size: 0.78rem; font-weight: 500; color: var(--warning); }
+.look-alike ul { margin: 0.4rem 0 0; padding-left: 1.15rem; font-family: var(--mono); font-size: 0.85rem; }
+.look-alike li { word-break: break-all; }
+.look-alike .note { font-size: 0.72rem; color: var(--text-muted); margin-top: 0.45rem; line-height: 1.6; }
+.flash-warn {
+  margin-top: 1rem; border: 1px solid var(--warning); background: rgba(230,126,34,0.07);
+  border-radius: 6px; padding: 0.75rem 0.9rem; font-size: 0.82rem;
+}
+.flash-warn p { margin: 0; }
+
 /* 錯誤 */
 .fatal { border-color: var(--danger); }
 .fatal h2 { color: var(--danger); }
@@ -243,7 +266,11 @@ input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow:
     <div class="test-info" id="poolInfo" style="margin-top:0.9rem"></div>
     <div class="btn-row">
       <button id="btnStart" disabled>請先選擇難度</button>
+      <button id="btnFlash" class="ghost">快速閃卡（不計分）</button>
     </div>
+    <p class="hint" style="margin:0.7rem 0 0">
+      閃卡模式不需選難度：只看圖，翻開後顯示藥名，不作答、不計分。適合測驗前先熟悉外觀。
+    </p>
   </section>
 
   <!-- 作答 -->
@@ -308,6 +335,44 @@ input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow:
     <div class="btn-row">
       <button id="btnDownload">下載成績卡 PNG</button>
       <button id="btnAgain" class="ghost">再測一回</button>
+    </div>
+  </section>
+
+  <!-- 快速閃卡（不計分）。背面內容在翻面前必須是空的，不可預先渲染再隱藏 -->
+  <section id="flash" class="card hidden">
+    <div class="progress-head">
+      <span>第 <span class="n" id="fIdx">1</span> / <span id="fTotal">20</span> 張</span>
+      <span class="badge">閃卡 · 不計分</span>
+    </div>
+    <div class="bar"><i id="fBar"></i></div>
+
+    <div class="q-img-wrap"><img id="fImg" class="q-img" alt="藥品外觀實拍圖"></div>
+    <div class="results" id="fFeatures"></div>
+
+    <div id="fBack" class="flash-back hidden"></div>
+
+    <div class="btn-row" id="flashActions">
+      <button id="btnFlip">翻開看藥名</button>
+      <button id="btnFlashNext" class="hidden">下一張</button>
+      <button id="btnFlashQuit" class="ghost">結束</button>
+    </div>
+
+    <div id="fWarnBox" class="flash-warn hidden">
+      <p id="fWarnMsg"></p>
+      <div class="btn-row">
+        <button id="btnFlashResume">繼續</button>
+        <button id="btnFlashStop" class="ghost">結束這疊</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 閃卡完成 -->
+  <section id="flashDone" class="card hidden">
+    <h2><span class="step-num">✓</span>閃卡完成 <span class="badge">不計分</span></h2>
+    <p class="hint" id="flashDoneSub"></p>
+    <div class="btn-row">
+      <button id="btnToQuiz">去測驗</button>
+      <button id="btnFlashAgain" class="ghost">再來一疊</button>
     </div>
   </section>
 

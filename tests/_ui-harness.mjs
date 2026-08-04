@@ -95,6 +95,7 @@ class El {
   appendChild(el) { this._appended.push(el); return el; }
   setAttribute(k, v) { this._attrs[k] = v; }
   getAttribute(k) { return this._attrs[k]; }
+  removeAttribute(k) { delete this._attrs[k]; }
   focus() {}
   click() { (this._listeners.click || []).forEach((f) => f()); }
 
@@ -138,7 +139,8 @@ export function installDom() {
 
   const get = (id) => {
     if (!els.has(id)) {
-      const e = id === 'qImg' ? new ImgEl(id) : new El(id);
+      // fImg 與 qImg 同樣要走非同步 settle，否則閃卡的圖片失敗路徑測不到
+      const e = (id === 'qImg' || id === 'fImg') ? new ImgEl(id) : new El(id);
       for (const c of INITIAL.get(id) || []) e.classList.add(c);
       els.set(id, e);
     }

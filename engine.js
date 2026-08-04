@@ -828,3 +828,82 @@ export function judgeChoice(pickedIdx, answerIdx) {
   if (answerIdx < 0 || answerIdx >= CHOICE_COUNT) return false;
   return pickedIdx === answerIdx;
 }
+
+// ── 快速閃卡（不計分）─────────────────────────────────────────────────
+
+export const DECK_SIZE = QUIZ_SIZE;
+
+/**
+ * 外觀重複組索引：外觀鍵 → 該外觀底下所有相異答案鍵。
+ *
+ * **刻意用 `l2Key` 而不是建置管線 Q5 的群組鍵。** 兩者的差別是
+ * `score_mark` 與 `size`：Q5 把它們納入鍵，因此「只差刻痕或尺寸」的品項
+ * 通得過 Q5 留在題庫裡；`l2Key` 把它們拿掉，因為那兩項在照片上是弱訊號
+ * （D12）。閃卡呈現的就是照片，判斷「這張圖是否唯一對應一個藥名」
+ * 必須用照片看得出來的特徵，否則會宣稱唯一卻其實不唯一。
+ *
+ * 2026-08-04 於 3,913 筆題庫實測：124 組外觀鍵對應到多個答案鍵，
+ * 涵蓋 311 題（7.9%），組內最多 9 個相異藥名。
+ */
+export function buildLookAlikeIndex(items) {
+  const byLook = new Map();
+  for (const it of items) {
+    const k = l2Key(it);
+    if (!byLook.has(k)) byLook.set(k, new Set());
+    byLook.get(k).add(it.ans);
+  }
+  const out = new Map();
+  for (const [k, set] of byLook) out.set(k, [...set].sort());
+  return out;
+}
+
+/**
+ * 與該筆外觀相同、但品名不同的其他答案鍵。
+ *
+ * 回傳空陣列代表這張圖在照片可見的特徵上唯一對應一個藥名。
+ * 閃卡背面據此決定要不要提醒「這個外觀不只一顆藥」——
+ * 少列了等於讓使用者建立錯誤的唯一對應，那是本模式最主要的失效模式。
+ */
+export function lookAlikesOf(item, lookAlikeIndex) {
+  const all = lookAlikeIndex.get(l2Key(item)) || [];
+  return all.filter((ans) => ans !== item.ans);
+}
+
+/**
+ * 一張閃卡。**沒有 state／mark／correct**——閃卡不計分，
+ * 借用 `newQuestion` 的形狀會讓它意外流進 `scoreQuiz` 的分母。
+ */
+export function newCard(item, token) {
+  return { item, token, flipped: false };
+}
+
+/** 翻面。已翻面即原樣回傳（重複點擊不產生新物件，與狀態機同一紀律）。 */
+export function flipCard(card) {
+  return card.flipped ? card : { ...card, flipped: true };
+}
+
+/**
+ * 抽一疊閃卡。答案鍵不重複，沿用 `drawQuiz` 的「答案鍵均勻」抽樣（D5）。
+ *
+ * 不做難度篩選、不組誘答——閃卡是單向輸出，沒有誘答可言，
+ * 因此也沒有 L1/L2 那套可解性條件要滿足。
+ *
+ * @throws {Error} code = 'INSUFFICIENT_KEYS' 當相異答案鍵不足 n 張
+ */
+export function drawDeck(items, { n = DECK_SIZE, rng = Math.random } = {}) {
+  return drawQuiz(items, n, rng).map((item, i) => newCard(item, i + 1));
+}
+
+/**
+ * 遞補一張（圖片載入失敗時用）。避開整疊已出現的答案鍵——
+ * 包含被替換掉的那張自己，否則會換到同一顆藥的另一筆外觀，
+ * 使用者看到的是「同一個藥名連著出現兩次」。
+ *
+ * @returns {object|null} 無可用候選時回傳 null（呼叫端應結束本疊）
+ */
+export function drawSpareCard({ index, deck, token, rng = Math.random }) {
+  const seen = new Set(deck.map((c) => c.item.ans));
+  const keys = index.keys.filter((ans) => !seen.has(ans));
+  if (!keys.length) return null;
+  return newCard(pick(index.byAns.get(pick(keys, rng)), rng), token);
+}
