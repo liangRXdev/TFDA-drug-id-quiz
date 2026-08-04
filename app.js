@@ -75,7 +75,21 @@ const state = {
   deck: [],
   fIdx: 0,
   fFails: 0,                 // 本疊累計遞補次數，使用者按「繼續」後歸零
-  fNextToken: 0,
+  fSeen: new Set(),          // 本疊出現過的答案鍵，含已被換掉的（只增不減）
+  fReady: false,             // 目前這張的圖已確認載入（ready-gate，同 L2 的 D21）
+  fTimer: null,              // 目前這張的載入逾時，換卡時必須清掉
+  /**
+   * 閃卡 token。**整個頁面生命週期單調遞增，開新疊不重設**——
+   * 每疊都從 1 起算的話，上一疊的遲到事件會與新疊的卡撞號，
+   * 而 token 正是用來分辨「這個事件屬於哪張卡」的唯一依據。
+   *
+   * **這條目前沒有行為測試守著**（變異驗證確認：改回每疊重設，測試仍全綠）。
+   * 原因是 `fImg` 只有一個 node、handler 每次 render 被覆寫，
+   * 帶著舊 token 的 handler 根本不存在，撞號因而觀察不到。
+   * 它是為「每張卡建獨立 `<img>` node」那筆改動預留的前置條件——
+   * 那筆改動涉及 L1/L3 共用的同一套寫法，屬獨立議題（見 verdict-flashcard.md CR-3）。
+   */
+  fNextToken: 1,
 };
 
 // ── 載入題庫（失敗路徑見規格 C4）──────────────────────────────────────
@@ -622,7 +636,9 @@ function lookAlikeIndex() {
 
 function startFlash() {
   try {
-    state.deck = drawDeck(state.pool.items, { n: DECK_SIZE, rng: Math.random });
+    state.deck = drawDeck(state.pool.items, {
+      n: DECK_SIZE, rng: Math.random, startToken: state.fNextToken,
+    });
   } catch (e) {
     if (e.code === 'INSUFFICIENT_KEYS') {
       return fatal(`題庫相異品名僅 ${e.available} 個，不足 ${DECK_SIZE} 張，無法組成一疊閃卡。`);
@@ -631,7 +647,8 @@ function startFlash() {
   }
   state.fIdx = 0;
   state.fFails = 0;
-  state.fNextToken = state.deck.length + 1;
+  state.fNextToken += state.deck.length;
+  state.fSeen = new Set(state.deck.map((c) => c.item.ans));
 
   show($('start'), false);
   show($('result'), false);
@@ -641,32 +658,65 @@ function startFlash() {
   renderCard();
 }
 
+const clearFlashTimer = () => { clearTimeout(state.fTimer); state.fTimer = null; };
+
+/** 背面（含 DOM 內容）歸零。翻面前、換卡時、進警示前都必須走這裡 */
+function clearBack() {
+  $('fBack').innerHTML = '';
+  show($('fBack'), false);
+}
+
 function renderCard() {
   const card = state.deck[state.fIdx];
   const it = card.item;
 
+  clearFlashTimer();
   $('fIdx').textContent = state.fIdx + 1;
   $('fBar').style.width = `${(state.fIdx / DECK_SIZE) * 100}%`;
 
   // 背面在翻面前必須是真的空的。留著上一張的內容再用 hidden 蓋住，
   // 等於把答案放在 DOM 裡讓讀屏與檢視原始碼看得到（F3）
-  $('fBack').innerHTML = '';
-  show($('fBack'), false);
+  clearBack();
   show($('btnFlip'));
-  $('btnFlip').disabled = false;
   show($('btnFlashNext'), false);
   show($('fWarnBox'), false);
 
-  // 圖片失敗守門與測驗同一套：token + src 三段比對，避免舊圖的遲到 onerror
-  // 換掉無辜的新卡（規格 D18／覆審 C5）
+  // ready-gate：圖片確認載入成功前不得翻面（沿用 L2 的 D21）。
+  // 沒有這道閘，使用者會在空白或上一張的 bitmap 上翻出新卡的藥名——
+  // 「圖片與藥名錯位」正是本工具最怕的失效模式。
+  $('btnFlip').disabled = true;
+  state.fReady = false;
+
+  // 生效條件與測驗同一套：token + src 兩段身分比對，擋掉舊圖的遲到事件
+  // （規格 D18／覆審 C5）
   const img = $('fImg');
   const myToken = card.token;
   const expected = DATA_DIR + it.img;
-  img.onerror = () => {
+
+  let settled = false;
+  const stale = () => {
     const cur = state.deck[state.fIdx];
-    if (!cur || cur.token !== myToken || img.getAttribute('src') !== expected) return;
-    replaceCard('圖片載入失敗');
+    return !cur || cur.token !== myToken || img.getAttribute('src') !== expected;
   };
+  const settle = (ok, reason) => {
+    if (settled) return;
+    settled = true;
+    clearFlashTimer();
+    if (stale()) return;                      // 遲到事件，一律忽略
+    if (ok) {
+      state.fReady = true;
+      $('btnFlip').disabled = false;
+      $('btnFlip').focus();
+    } else {
+      replaceCard(reason);
+    }
+  };
+
+  // ready-gate 的直接後果：一張永久 pending 的圖會讓翻面永遠停用，
+  // 使用者卡死在這一張。逾時門檻沿用 L2 的同一個值（D21）
+  state.fTimer = setTimeout(() => settle(false, '圖片載入逾時'), L2_LOAD_TIMEOUT_MS);
+  img.onload = () => settle((img.naturalWidth ?? 1) > 0, '圖片尺寸為零');
+  img.onerror = () => settle(false, '圖片載入失敗');
   img.alt = `藥品外觀實拍圖：${it.shape.join('／')}、${it.color.join('／')}`;
   img.setAttribute('src', expected);
   img.src = expected;
@@ -678,8 +728,6 @@ function renderCard() {
     + featureCell('外觀尺寸', it.size ? `${it.size} mm` : '—')
     + featureCell('標記一', it.mark1)
     + (it.mark2 ? featureCell('標記二', it.mark2) : '');
-
-  $('btnFlip').focus();
 }
 
 /**
@@ -689,6 +737,8 @@ function renderCard() {
 function flip() {
   const card = state.deck[state.fIdx];
   if (!card || card.flipped) return;
+  // 按鈕的 disabled 只是外觀，這裡才是 ready-gate 真正的守門（同 startQuiz 的紀律）
+  if (!state.fReady) return;
   state.deck[state.fIdx] = flipCard(card);
 
   const it = card.item;
@@ -733,16 +783,23 @@ function nextCard() {
  * 離線或圖床掛掉時會把整疊安靜換完，使用者只看到卡片一直跳。
  */
 function replaceCard(reason) {
+  clearFlashTimer();
   const token = state.fNextToken++;
-  const spare = drawSpareCard({ index: state.index, deck: state.deck, token, rng: Math.random });
+  // 排除集合是本疊的歷史，不是 deck 現況——理由見 engine.js 的 drawSpareCard
+  const spare = drawSpareCard({ index: state.index, exclude: state.fSeen, token, rng: Math.random });
   if (!spare) {
     return finishFlash('題庫已無可替換的品項，本疊提前結束。');
   }
+  state.fSeen.add(spare.item.ans);
   state.deck[state.fIdx] = spare;
   state.fFails++;
 
   if (state.fFails >= MAX_FLASH_FAIL) {
+    state.fReady = false;
     $('fImg').removeAttribute('src');          // 停在警示畫面時不要繼續打圖床
+    // 使用者可能已經翻開上一張。警示不經過 renderCard，這裡不清就會留著
+    // 上一張的藥名，而 state 已經指向遞補卡——DOM 與狀態不同步（CR-4）
+    clearBack();
     $('fWarnMsg').textContent =
       `已有 ${state.fFails} 張圖片載入失敗（最近一次：${reason}）。`
       + '可能是網路不穩或圖檔缺漏。要繼續看這疊嗎？';
@@ -763,6 +820,8 @@ function resumeFlash() {
 }
 
 function finishFlash(note = '') {
+  clearFlashTimer();                 // 離開後才 fire 的逾時會誤觸遞補
+  state.fReady = false;
   const flipped = state.deck.filter((c) => c.flipped).length;
   const withAlts = state.deck.filter((c) => lookAlikesOf(c.item, lookAlikeIndex()).length).length;
 

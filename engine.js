@@ -890,20 +890,24 @@ export function flipCard(card) {
  *
  * @throws {Error} code = 'INSUFFICIENT_KEYS' 當相異答案鍵不足 n 張
  */
-export function drawDeck(items, { n = DECK_SIZE, rng = Math.random } = {}) {
-  return drawQuiz(items, n, rng).map((item, i) => newCard(item, i + 1));
+export function drawDeck(items, { n = DECK_SIZE, rng = Math.random, startToken = 1 } = {}) {
+  return drawQuiz(items, n, rng).map((item, i) => newCard(item, startToken + i));
 }
 
 /**
- * 遞補一張（圖片載入失敗時用）。避開整疊已出現的答案鍵——
- * 包含被替換掉的那張自己，否則會換到同一顆藥的另一筆外觀，
- * 使用者看到的是「同一個藥名連著出現兩次」。
+ * 遞補一張（圖片載入失敗時用）。
  *
+ * `exclude` 由呼叫端維護，必須涵蓋**本疊生命週期內出現過的所有答案鍵**，
+ * 包含已經被換掉的那幾張。**刻意不從 deck 現況推導**——遞補是覆蓋寫入，
+ * 被換掉那張的答案鍵會從 deck 消失，據此推導只避得開「還在架上的」，
+ * 下一次失敗就把它抽回來，使用者於是在同一疊裡看到同一顆藥兩次。
+ * 圖源整批失敗時更會在少數候選間來回循環，`null` 的終止語意跟著失效。
+ *
+ * @param {Set<string>} exclude 不得抽中的答案鍵（呼叫端累積，只增不減）
  * @returns {object|null} 無可用候選時回傳 null（呼叫端應結束本疊）
  */
-export function drawSpareCard({ index, deck, token, rng = Math.random }) {
-  const seen = new Set(deck.map((c) => c.item.ans));
-  const keys = index.keys.filter((ans) => !seen.has(ans));
+export function drawSpareCard({ index, exclude, token, rng = Math.random }) {
+  const keys = index.keys.filter((ans) => !exclude.has(ans));
   if (!keys.length) return null;
   return newCard(pick(index.byAns.get(pick(keys, rng)), rng), token);
 }

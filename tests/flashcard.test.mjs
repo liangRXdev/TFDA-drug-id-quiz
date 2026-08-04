@@ -89,27 +89,50 @@ describe('閃卡純函式', () => {
     );
   });
 
-  test('drawSpareCard 避開整疊已出現的答案鍵，含被替換的那張自己', () => {
-    // 〔堵〕只避開「其他張」，會換到同一顆藥的另一筆外觀，
-    //       使用者看到同一個藥名連著出現兩次
+  test('drawSpareCard 避開本疊歷史上出現過的所有答案鍵，不只 deck 現況', () => {
+    // 〔堵〕從 deck 現況推導排除集合。遞補是覆蓋寫入，被換掉那張的答案鍵
+    //       會從 deck 消失，下一次失敗就把它抽回來——同一疊裡同一顆藥出現兩次。
+    //       本測試必須真的把 spare 寫回 deck 再抽下一張，否則測不到這條
+    //       （只重複呼叫、傳同一個沒改過的 deck，是假綠燈）
     const items = Array.from({ length: 25 }, (_, i) => mk(`D${i}`, `M${i}`));
     const index = buildIndex(items);
     const deck = drawDeck(items, { n: DECK_SIZE, rng: makeRng(3) });
-    const seen = new Set(deck.map((c) => c.item.ans));
-    for (let i = 0; i < 30; i++) {
-      const spare = drawSpareCard({ index, deck, token: 99, rng: makeRng(i) });
-      assert.ok(spare, '仍有候選時不得回傳 null');
-      assert.equal(seen.has(spare.item.ans), false, `遞補 ${spare.item.ans} 與整疊重複`);
+    const history = new Set(deck.map((c) => c.item.ans));
+
+    // 25 個鍵、20 張在架上 → 至多 5 次遞補後耗盡
+    let drawn = 0;
+    for (let i = 0; i < 10; i++) {
+      const spare = drawSpareCard({ index, exclude: history, token: 99 + i, rng: makeRng(i) });
+      if (!spare) break;
+      assert.equal(history.has(spare.item.ans), false,
+        `第 ${i + 1} 次遞補抽回了本疊已出現過的 ${spare.item.ans}`);
       assert.equal(spare.flipped, false);
-      assert.equal(spare.token, 99);
+      assert.equal(spare.token, 99 + i);
+      history.add(spare.item.ans);
+      deck[0] = spare;                       // app.js replaceCard 的覆蓋寫入
+      drawn++;
     }
+    assert.equal(drawn, 5, '25 個鍵扣掉整疊 20 張，應恰好遞補 5 次後耗盡');
+    assert.equal(history.size, 25);
   });
 
   test('drawSpareCard 候選耗盡回傳 null', () => {
     const items = Array.from({ length: DECK_SIZE }, (_, i) => mk(`D${i}`, `M${i}`));
     const index = buildIndex(items);
     const deck = drawDeck(items, { n: DECK_SIZE, rng: makeRng(5) });
-    assert.equal(drawSpareCard({ index, deck, token: 99, rng: makeRng(1) }), null);
+    const history = new Set(deck.map((c) => c.item.ans));
+    assert.equal(drawSpareCard({ index, exclude: history, token: 99, rng: makeRng(1) }), null);
+  });
+
+  test('drawDeck 的 startToken 讓跨疊 token 不重號', () => {
+    // 〔堵〕每疊都從 1 起算，上一疊的遲到事件會與新疊的卡撞號，
+    //       而 token 正是分辨「事件屬於哪張卡」的唯一依據
+    const items = Array.from({ length: 40 }, (_, i) => mk(`D${i}`, `M${i}`));
+    const d1 = drawDeck(items, { n: DECK_SIZE, rng: makeRng(11), startToken: 1 });
+    const d2 = drawDeck(items, { n: DECK_SIZE, rng: makeRng(12), startToken: 1 + DECK_SIZE });
+    const all = new Set([...d1, ...d2].map((c) => c.token));
+    assert.equal(all.size, DECK_SIZE * 2, '兩疊的 token 不得重疊');
+    assert.equal(d2[0].token, DECK_SIZE + 1);
   });
 });
 
@@ -165,6 +188,55 @@ describe('F1 進入與離開閃卡', () => {
     assert.equal(hidden('start'), false);
     assert.equal(hidden('flashDone'), true);
     assert.equal($('btnStart').disabled, true, '回開始頁必須重新選難度（§6.1）');
+  });
+});
+
+describe('F3 ready-gate：圖片確認載入前不得翻面', () => {
+  before(needPool);
+
+  test('圖片仍 pending 時翻面停用，硬點也不得顯示藥名', async () => {
+    // 〔堵〕沒有 ready-gate，使用者會在空白或上一張的 bitmap 上翻出新卡的藥名，
+    //       這正是「圖片與藥名錯位」——本工具最怕的失效模式
+    dom.img.reset();
+    const deck = drawDeck(POOL.items, { n: DECK_SIZE, rng: makeRng(901) });
+    dom.img.pending.add(srcOf(deck[0].item));      // 永不 settle
+    Math.random = makeRng(901);
+    $('btnFlash').click();
+    await dom.settle();
+
+    assert.equal($('btnFlip').disabled, true, '圖片未 ready 時翻面必須停用');
+    $('btnFlip').click();                          // disabled 只是外觀，state 才是守門
+    assert.equal(hidden('fBack'), true, 'ready 前不得翻面');
+    assert.equal($('fBack').innerHTML, '', 'ready 前 DOM 不得出現藥名');
+    assert.ok(!$('fBack').innerHTML.includes(deck[0].item.ans));
+
+    dom.img.reset();
+  });
+
+  test('圖片載入成功後才啟用翻面', async () => {
+    dom.img.reset();
+    startDeckDeterministic(902);
+    await dom.settle();
+    assert.equal($('btnFlip').disabled, false, '載入成功後應可翻面');
+    $('btnFlip').click();
+    assert.equal(hidden('fBack'), false);
+  });
+
+  test('載入成功後的遲到 onerror 不得替換已翻面的卡', async () => {
+    // 圖片已 settle，後續事件一律忽略——否則使用者看著的卡會被抽換掉
+    dom.img.reset();
+    const deck = startDeckDeterministic(903);
+    await dom.settle();
+    $('btnFlip').click();
+    const backBefore = $('fBack').innerHTML;
+
+    $('fImg').onerror?.();                         // C11 手法：強制 late-dispatch
+    await dom.settle();
+
+    assert.equal($('fBack').innerHTML, backBefore, '遲到事件改變了已翻面的卡');
+    assert.equal($('fIdx').textContent, 1, '遲到事件造成了跳卡');
+    assert.equal(hidden('fWarnBox'), true);
+    assert.ok(backBefore.includes(deck[0].item.ans));
   });
 });
 
@@ -317,13 +389,23 @@ describe('F4 圖片載入失敗', () => {
     dom.img.reset();
   });
 
-  test('按「繼續」計數歸零並回到卡片；按「結束這疊」進完成頁', async () => {
+  test('按「繼續」把計數歸零（留在同一疊驗證，不靠新開一疊）', async () => {
+    // 〔堵〕resumeFlash 不歸零。若在 resume 後另開一疊來驗，startFlash 本身
+    //       就會歸零，斷言於是恆為真——那是假綠燈。這裡留在同一疊，
+    //       用警示訊息裡的張數辨別：沒歸零的話第 1 次失敗就跳，且會顯示「已有 4 張」
     dom.img.reset();
     for (const it of POOL.items) dom.img.fail.add(srcOf(it));
     Math.random = makeRng(702);
     $('btnFlash').click();
     await dom.settle();
     assert.equal(hidden('fWarnBox'), false);
+    assert.match($('fWarnMsg').textContent, /已有 3 張/);
+
+    $('btnFlashResume').click();           // 網路仍壞，直接再撞一輪
+    await dom.settle();
+    assert.equal(hidden('fWarnBox'), false, 'resume 後圖仍全壞，應再次跳警示');
+    assert.match($('fWarnMsg').textContent, /已有 3 張/,
+      'resume 未把計數歸零（訊息顯示的是累加值）');
 
     dom.img.reset();                       // 網路恢復
     $('btnFlashResume').click();
@@ -331,16 +413,40 @@ describe('F4 圖片載入失敗', () => {
     assert.equal(hidden('fWarnBox'), true);
     assert.equal(hidden('flash'), false);
     assert.equal(hidden('btnFlip'), false, '恢復後應可繼續翻牌');
+    assert.equal($('btnFlip').disabled, false, '恢復後圖片載入成功，應可翻面');
+  });
 
-    // 再壞一次，這次選結束
+  test('按「結束這疊」進完成頁', async () => {
+    dom.img.reset();
     for (const it of POOL.items) dom.img.fail.add(srcOf(it));
     Math.random = makeRng(703);
     $('btnFlash').click();
     await dom.settle();
-    assert.equal(hidden('fWarnBox'), false, '按過繼續後計數歸零，仍應累計到第 3 次才再跳警示');
+    assert.equal(hidden('fWarnBox'), false);
     $('btnFlashStop').click();
     assert.equal(hidden('flashDone'), false);
     assert.match($('flashDoneSub').textContent, /已結束這疊/);
+    dom.img.reset();
+  });
+
+  test('警示畫面上不得殘留任何藥名', async () => {
+    // 目前由兩道保證：renderCard 每次清背面、replaceCard 進警示前再清一次。
+    // 後者是防禦性的——ready-gate 讓「翻面後同一張才失敗」走不到，
+    // 但 gate 若被改動，這條不變量仍須成立
+    dom.img.reset();
+    startDeckDeterministic(704);
+    await dom.settle();
+    $('btnFlip').click();                          // 先翻開第 1 張
+    const shown = $('fBack').innerHTML;
+    assert.notEqual(shown, '');
+
+    for (const it of POOL.items) dom.img.fail.add(srcOf(it));
+    $('btnFlashNext').click();                     // 之後每張都載不到
+    await dom.settle();
+
+    assert.equal(hidden('fWarnBox'), false);
+    assert.equal($('fBack').innerHTML, '', '警示時背面必須是空的');
+    assert.equal(hidden('fBack'), true);
     dom.img.reset();
   });
 });
