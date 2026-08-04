@@ -4,9 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#3D7A8A">
-<meta name="description" content="藥品辨識王：以食藥署藥品外觀資料集出題，藥師依實拍圖與外觀特徵辨識英文品名的自我測驗工具。每回合 20 題，可下載成績卡。">
+<meta name="description" content="藥品辨識王：以食藥署藥品外觀資料集出題，藥師依實拍圖與外觀特徵辨識英文品名的自我測驗工具。每回合 20 題，可下載成績卡，另有不計分閃卡模式。">
 <title>藥品辨識王 — 藥師外觀辨識自我測驗</title>
 <link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="藥品辨識王">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
@@ -388,5 +393,15 @@ input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow:
 
 <canvas id="cardCanvas" class="hidden"></canvas>
 <script type="module" src="app.js"></script>
+<script>
+// SW 只快取 app shell，題庫與藥品圖片一律直通網路（理由見 sw.js 檔頭）。
+// 註冊失敗不影響任何功能——本工具本來就不宣稱離線可用，因此靜默吞掉，
+// 不要拿它去干擾使用者正在作答的畫面。
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch((e) => console.warn('[sw] 註冊失敗', e));
+  });
+}
+</script>
 </body>
 </html>

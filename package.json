@@ -8,7 +8,8 @@
     "test": "node --test \"tests/**/*.test.mjs\"",
     "build:pool": "node tools/build-pool.mjs",
     "fetch:images": "uv run --locked --script tools/fetch-images.py",
-    "verify": "node tools/verify-data.mjs"
+    "verify": "node tools/verify-data.mjs",
+    "icons": "uv run --script tools/make-icons.py"
   },
   "engines": {
     "node": ">=22"

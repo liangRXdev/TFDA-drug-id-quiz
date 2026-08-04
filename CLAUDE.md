@@ -46,22 +46,37 @@
 變動幅度 >±3% 或單次移除 >50 題時，`build-pool.mjs` 會拒絕發布並要求人工裁決
 （CI 會自動開 issue）。確認差異無誤後才用 `--allow-any-delta` 重跑。
 
-## 沒有 Service Worker，是刻意的
+## SW 只快取 app shell —— 題庫與圖片永遠不進快取
 
-離線不在目標內。曾經寫進驗收條件，覆審時發現「斷網重整後可作答」要兌現
-就得預載全部圖片（約 50MB），與「首屏 <3MB」直接衝突，且 SW 會製造
-「新 pool 配舊圖片」的版本錯配——那正好命中答案與圖片對應錯誤的最高風險。
-`manifest.webmanifest` 保留（theme-color／icon），但不註冊 SW、不宣稱離線。
+2026-08-04 PWA 化。在此之前是「完全不做 SW」，改動的是**可安裝性**，
+不是離線策略——**離線仍然不在目標內**，原本的兩個否決理由一個都沒有消失：
 
-house style 的「全部工具都是 PWA」對本專案不適用。
+1. 「斷網重整後可作答」要兌現得預載全部圖片（約 50MB），與「首屏 <3MB」衝突
+2. 快取圖片會製造「新 pool 配舊圖片」的版本錯配——顯示 A 藥的照片、標成 B 藥的名字，
+   正好命中本專案最高風險
+
+因此 `sw.js` 的界線是：`data/pool.json` 與 `data/img/**` **連 `respondWith` 都不呼叫**，
+行為與沒有 SW 時完全一致；其餘 shell 走 network-first，快取只作為離線兜底。
+離線時 app 開得起來但題庫載不到，走既有的 C4 失敗路徑顯示「無法連線讀取題庫」——
+那是誠實的降級，不是壞掉。`manifest` 的 description 明寫「需連網使用」。
+
+**這條界線由 `tests/sw.test.mjs` 守著**（真的載入 sw.js 驅動 fetch handler，
+不是比對原始碼字串）。要動 SW 的快取範圍前先讀那個檔的檔頭。
+
+圖示由 `tools/make-icons.py` 從 `icon.svg` 的幾何**重繪**而非轉檔
+（cairosvg 在 Windows 需要系統 cairo DLL，實測裝不起來）。
+**改 `icon.svg` 要一併改該腳本**，兩份幾何定義會漂移且沒有測試會抓到。
+
+house style 的「全部工具都是 PWA」現在適用了，但**僅限可安裝這一層**。
 
 ## 指令
 
 ```bash
-npm test                 # engine + 難度分級 + UI 接線（139 項）；需 Node ≥22（glob）
+npm test                 # engine + 難度分級 + 閃卡 + UI 接線 + SW 界線（180 項）；需 Node ≥22（glob）
 npm run build:pool       # 抓來源 → 產 data/pool.json
 npm run fetch:images     # 鏡像圖片（uv + Pillow）
 npm run verify           # 資料完整性（B 組）
+npm run icons            # 由 icon.svg 幾何重繪 PWA 圖示（uv + Pillow）
 ```
 
 `build:pool` 開發時可加 `--source <本機zip>` 避免重複打 TFDA。
