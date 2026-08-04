@@ -174,7 +174,7 @@ describe('C16 L3 完整回合（v2 行為不得回歸）', () => {
 });
 
 describe('C17 縮放未被停用（D22）', () => {
-  test('viewport 不得停用縮放', () => {
+  test('viewport 不得停用縮放，也不得停用放大後的平移', () => {
     // 〔堵〕為了「像 app 一點」加上 user-scalable=no，畫面完全正常，
     //       但 L2 的可解性建立在 pinch-zoom 之上，會靜默失效
     const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
@@ -183,6 +183,8 @@ describe('C17 縮放未被停用（D22）', () => {
     const content = m[1];
     assert.doesNotMatch(content, /user-scalable\s*=\s*no/i);
     assert.doesNotMatch(content, /maximum-scale\s*=\s*[1-4](\.|,|$|\s)/i);
+    // `pinch-zoom` 這個值允許縮放但**禁止單指平移**，放大後就移不到要看的刻字，
+    // 對可解性的傷害與停用縮放同級——它出現在這條斷言裡不是誤擋（覆審 TG-8）
     assert.doesNotMatch(html, /touch-action:\s*(none|pinch-zoom)/i);
   });
 });

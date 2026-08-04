@@ -788,7 +788,8 @@ function replaceCard(reason) {
   // 排除集合是本疊的歷史，不是 deck 現況——理由見 engine.js 的 drawSpareCard
   const spare = drawSpareCard({ index: state.index, exclude: state.fSeen, token, rng: Math.random });
   if (!spare) {
-    return finishFlash('題庫已無可替換的品項，本疊提前結束。');
+    // 目前這張換不掉、也顯示不出來，因此不算看過
+    return finishFlash('題庫已無可替換的品項，本疊提前結束。', state.fIdx);
   }
   state.fSeen.add(spare.item.ans);
   state.deck[state.fIdx] = spare;
@@ -819,17 +820,26 @@ function resumeFlash() {
   renderCard();
 }
 
-function finishFlash(note = '') {
+/**
+ * 完成頁。
+ *
+ * @param {string} note 提前結束的說明
+ * @param {number} shown 使用者**實際看到**的張數，預設整疊。
+ *   不可一律用 `deck.length`——遞補是覆蓋寫入，張數恆為 20，
+ *   提前結束時會把根本沒顯示出來的卡算成「看過」（CR-5）。
+ */
+function finishFlash(note = '', shown = state.deck.length) {
   clearFlashTimer();                 // 離開後才 fire 的逾時會誤觸遞補
   state.fReady = false;
-  const flipped = state.deck.filter((c) => c.flipped).length;
-  const withAlts = state.deck.filter((c) => lookAlikesOf(c.item, lookAlikeIndex()).length).length;
+  const seen = state.deck.slice(0, shown);
+  const flipped = seen.filter((c) => c.flipped).length;
+  const withAlts = seen.filter((c) => lookAlikesOf(c.item, lookAlikeIndex()).length).length;
 
   show($('flash'), false);
   show($('flashDone'));
   $('flashDoneSub').textContent =
     (note ? `${note}　` : '')
-    + `本疊 ${state.deck.length} 張，翻開 ${flipped} 張`
+    + `看過 ${shown} / ${DECK_SIZE} 張，翻開 ${flipped} 張`
     + (withAlts ? `　·　其中 ${withAlts} 張的外觀另有相似品項` : '')
     + '　·　閃卡不計分，成績請走測驗模式。';
   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -837,7 +847,7 @@ function finishFlash(note = '') {
 
 function quitFlash() {
   $('fImg').removeAttribute('src');
-  finishFlash();
+  finishFlash('', state.fIdx + 1);          // 目前這張已經呈現過，算看過
 }
 
 // ── 成績 ─────────────────────────────────────────────────────────────
@@ -1064,7 +1074,7 @@ $('btnFlashQuit').addEventListener('click', quitFlash);
 $('btnFlashResume').addEventListener('click', resumeFlash);
 $('btnFlashStop').addEventListener('click', () => {
   $('fImg').removeAttribute('src');
-  finishFlash('已結束這疊。');
+  finishFlash('已結束這疊。', state.fIdx + 1);
 });
 $('btnToQuiz').addEventListener('click', backToStart);
 $('btnFlashAgain').addEventListener('click', startFlash);

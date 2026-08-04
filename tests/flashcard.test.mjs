@@ -313,18 +313,22 @@ describe('F3 翻面與相似品項', () => {
 describe('F2 走完一整疊', () => {
   before(needPool);
 
-  test('20 張翻完進入完成頁，進度與統計正確', async () => {
+  test('20 張翻完進入完成頁，張數、進度條與統計正確', async () => {
     const deck = startDeckDeterministic(501);
     await dom.settle();
     for (let i = 0; i < DECK_SIZE; i++) {
       assert.equal(hidden('flash'), false, `第 ${i + 1} 張時不該已結束`);
       assert.equal($('fIdx').textContent, i + 1);
+      // 進度條代表「已完成張數」：第 1 張時是 0%，不是 5%
+      assert.equal($('fBar').style.width, `${(i / DECK_SIZE) * 100}%`,
+        `第 ${i + 1} 張的進度條不對`);
       $('btnFlip').click();
       $('btnFlashNext').click();
       await dom.settle();
     }
     assert.equal(hidden('flashDone'), false);
     assert.equal(hidden('flash'), true);
+    assert.match($('flashDoneSub').textContent, /看過 20 \/ 20 張/);
     assert.match($('flashDoneSub').textContent, /翻開 20 張/);
     assert.match($('flashDoneSub').textContent, /不計分/);
 
@@ -340,6 +344,17 @@ describe('F2 走完一整疊', () => {
     await dom.settle();
     $('btnFlashQuit').click();
     assert.match($('flashDoneSub').textContent, /翻開 1 張/);
+  });
+
+  test('中途結束時摘要只算實際看過的張數，不是整疊 20', async () => {
+    // 〔堵〕固定讀 deck.length。遞補是覆蓋寫入、張數恆為 20，
+    //       中途離開就會把還沒顯示出來的卡也算成「看過」（CR-5）
+    startDeckDeterministic(503);
+    await dom.settle();
+    for (let i = 0; i < 4; i++) { $('btnFlip').click(); $('btnFlashNext').click(); await dom.settle(); }
+    $('btnFlashQuit').click();                    // 停在第 5 張
+    assert.match($('flashDoneSub').textContent, /看過 5 \/ 20 張/);
+    assert.doesNotMatch($('flashDoneSub').textContent, /看過 20/);
   });
 });
 
@@ -373,7 +388,6 @@ describe('F4 圖片載入失敗', () => {
   test('本疊累計 3 張失敗 → 停下來問使用者，不靜默換完整疊', async () => {
     // 〔堵〕沒有這道閘，離線時整疊會被安靜換完，使用者只看到卡片一直跳
     dom.img.reset();
-    const deck = drawDeck(POOL.items, { n: DECK_SIZE, rng: makeRng(701) });
     // 讓所有圖都失敗：遞補幾次都會再失敗，必然撞到上限
     for (const it of POOL.items) dom.img.fail.add(srcOf(it));
     Math.random = makeRng(701);
@@ -384,7 +398,17 @@ describe('F4 圖片載入失敗', () => {
     assert.match($('fWarnMsg').textContent, /載入失敗/);
     assert.equal(hidden('btnFlip'), true, '警示中不得繼續翻牌');
     assert.equal($('fImg').getAttribute('src'), undefined, '警示中不應繼續打圖床');
-    assert.ok(deck.length === DECK_SIZE);
+    // 停在原地等使用者決定：不得靜默換完整疊，也不得逕自進完成頁
+    assert.equal(hidden('flashDone'), true, '警示時不該已結束');
+    assert.equal(hidden('flash'), false);
+
+    // 張數有沒有被偷推進，要等 resume 重繪才看得到——警示路徑不走 renderCard，
+    // 直接斷言 fIdx 的 DOM 值恆為 1，測不到任何東西
+    dom.img.reset();                               // 網路恢復
+    $('btnFlashResume').click();
+    await dom.settle();
+    assert.equal($('fIdx').textContent, 1, '警示期間推進了張數，使用者會跳過沒看到的卡');
+    assert.equal(hidden('flash'), false);
 
     dom.img.reset();
   });
@@ -505,7 +529,10 @@ describe('F5 閃卡在手機上可用', () => {
     assert.match(h, /\.flash-back \.ans \{[^}]*word-break/);
   });
 
-  test('閃卡未停用縮放（D22）', () => {
+  test('閃卡未停用縮放，也未停用放大後的平移（D22）', () => {
+    // `touch-action: pinch-zoom` 本身允許縮放，但**禁止單指平移**——
+    // 放大後就無法移動去看刻字，對可解性的傷害與停用縮放同級，因此一併擋。
+    // 名稱只寫「縮放」會讓後人以為這個值是被誤擋的（覆審 TG-8）
     const h = html();
     assert.doesNotMatch(h, /touch-action:\s*(none|pinch-zoom)/i);
     assert.doesNotMatch(h.match(/<meta\s+name="viewport"\s+content="([^"]*)"/i)[1], /user-scalable\s*=\s*no/i);
