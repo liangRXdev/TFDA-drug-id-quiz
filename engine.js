@@ -829,6 +829,21 @@ export function judgeChoice(pickedIdx, answerIdx) {
   return pickedIdx === answerIdx;
 }
 
+/**
+ * 中文品名的顯示用清理。
+ *
+ * **只壓空白，不改字。** 來源資料有全形空白當 padding
+ * （實測 1 筆：`"國嘉"抗血膠囊250毫克` 後面接 16 個全形空白再接一個 `T`），
+ * 直接塞進選項會把按鈕撐開一大片空白。
+ *
+ * 刻意不做「移除劑型詞」之類的改寫——畫面上出現的必須是完整的官方品名，
+ * 殘缺品名在臨床情境會自成誤導來源。L1 選項因此可由劑型詞推得答案，
+ * 那是已知且接受的取捨（見 app.js 的 LEVELS[L1]）。
+ */
+export function displayZh(zh) {
+  return String(zh ?? '').replace(/[\s　]+/g, ' ').trim();
+}
+
 // ── 快速閃卡（不計分）─────────────────────────────────────────────────
 
 export const DECK_SIZE = QUIZ_SIZE;

@@ -16,7 +16,7 @@ import {
   normalize, squash, editDistance, judge, makeHint,
   drawQuiz, makeRng, QUIZ_SIZE,
   QState, transition, newQuestion, scoreQuiz,
-  FUZZY_MIN_LEN, HINTED_MARK,
+  FUZZY_MIN_LEN, HINTED_MARK, displayZh,
 } from '../engine.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -404,5 +404,35 @@ describe('A6 — 計分（規格 6.6）', () => {
     const r = scoreQuiz(build(20, (q) => fail(q)));
     assert.equal(r.counted, 0);
     assert.equal(r.score, 0);
+  });
+});
+
+// ── 中文品名顯示 ─────────────────────────────────────────────────────
+
+describe('displayZh 中文品名顯示清理', () => {
+  test('壓縮全形空白 padding（來源資料實際有這種）', () => {
+    // 實測來源：`"國嘉"抗血膠囊250毫克` 後接 16 個全形空白再接一個 T。
+    // 不處理的話 L1 選項會被撐開一整片空白
+    const dirty = '”國嘉”抗血膠囊250毫克　　　　　　　　　　　　　　　　 T';
+    assert.equal(displayZh(dirty), '”國嘉”抗血膠囊250毫克 T');
+  });
+
+  test('壓縮半形連續空白並去頭尾', () => {
+    assert.equal(displayZh('  "甲" 乙   丙  '), '"甲" 乙 丙');
+  });
+
+  test('null／undefined／空字串回空字串，不回 "null"', () => {
+    // 〔堵〕`String(zh)` 對 null 會產出字串 "null"，直接印進選項
+    assert.equal(displayZh(null), '');
+    assert.equal(displayZh(undefined), '');
+    assert.equal(displayZh(''), '');
+  });
+
+  test('只壓空白，不改動任何字元', () => {
+    // 〔堵〕順手把劑型詞或引號一起清掉。畫面上必須是完整官方品名——
+    //       殘缺品名在臨床情境自成誤導來源（這是 L1 加中文時定的取捨）
+    const zh = '"輝瑞"脈優錠5毫克';
+    assert.equal(displayZh(zh), zh);
+    assert.equal(displayZh('”國嘉”抗血膠囊250毫克'), '”國嘉”抗血膠囊250毫克');
   });
 });

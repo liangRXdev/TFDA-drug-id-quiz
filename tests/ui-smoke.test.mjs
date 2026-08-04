@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { installDom, ROOT } from './_ui-harness.mjs';
 import {
-  Level, buildIndex, eligibleKeys, drawLeveledQuiz, makeRng, QState, CHOICE_COUNT,
+  Level, buildIndex, eligibleKeys, drawLeveledQuiz, makeRng, QState, CHOICE_COUNT, displayZh,
 } from '../engine.js';
 
 const hasPool = fs.existsSync(path.join(ROOT, 'data/pool.json'));
@@ -170,6 +170,89 @@ describe('C16 L3 完整回合（v2 行為不得回歸）', () => {
     $('btnDownload').click();
     await new Promise((r) => setTimeout(r, 200));
     assert.match(drawn.join(' '), /困難級/);
+  });
+});
+
+describe('L1 選項附中文品名', () => {
+  before(needPool);
+
+  /** app.js 的 escapeHtml 等價實作——品名含 " 與 ' 時 DOM 內是實體 */
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  /** 取出所有 <span class="zh"> 的內容 */
+  const zhCells = () => [...$('qOptions').innerHTML.matchAll(/<span class="zh">([\s\S]*?)<\/span>/g)]
+    .map((m) => m[1]);
+
+  test('四個選項各自顯示英文與中文品名', () => {
+    const expected = startLevelDeterministic(Level.L1, 9101);
+    const html = $('qOptions').innerHTML;
+    for (const o of expected[0].options) {
+      assert.ok(html.includes(esc(o.ans)), `選項缺英文品名 ${o.ans}`);
+      assert.ok(html.includes(esc(displayZh(o.zh))), `選項缺中文品名 ${o.zh}`);
+    }
+    assert.equal(zhCells().length, CHOICE_COUNT, '四格都要有中文品名欄');
+  });
+
+  test('渲染出的中文品名沒有連續空白', () => {
+    // 只檢查 zh 欄本身——模板本來就有縮排空白，掃整段 HTML 測不到東西。
+    //
+    // **這條的守備力取決於題庫當下的髒資料量。** 目前 3,913 筆裡只有 1 筆
+    // 帶全形空白 padding，隨機 20 題幾乎抽不到——變異驗證證實：把 displayZh
+    // 拿掉改印 raw zh，這條仍全綠。真正守住清理邏輯的是 engine.test.mjs 的
+    // displayZh 測試（用固定的髒字串）。這裡留著是為了將來髒資料變多時能擋，
+    // 不是因為它現在擋得住。
+    startLevelDeterministic(Level.L1, 9102);
+    for (const zh of zhCells()) {
+      assert.doesNotMatch(zh, /　{2,}/, `中文品名有連續全形空白：${JSON.stringify(zh)}`);
+      assert.doesNotMatch(zh, /\s{2,}/, `中文品名有連續空白：${JSON.stringify(zh)}`);
+      assert.equal(zh, zh.trim(), '中文品名頭尾有空白');
+    }
+  });
+
+  test('選項版面：長品名可斷行，序號對齊第一行', () => {
+    // 〔堵〕flex 子項少了 min-width:0 就不會斷行，長中文品名會把按鈕撐出容器
+    const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+    assert.match(html, /\.opt \.txt \{[^}]*min-width:\s*0/);
+    assert.match(html, /\.opt \{[^}]*align-items:\s*flex-start/);
+    assert.match(html, /\.opt \{[^}]*word-break/);
+  });
+
+  test('中文品名不影響判定：正解仍由 answerIdx 決定', () => {
+    // 〔堵〕改用品名字串比對來判定。顯示層加欄位不該動到判定路徑
+    const expected = startLevelDeterministic(Level.L1, 9103);
+    const q0 = expected[0];
+    const opts = $('qOptions').querySelectorAll('.opt');
+    opts[q0.answerIdx].click();
+    assert.match($('qVerdict').innerHTML, /答對/);
+    assert.match($('qVerdict').className, /ok/);
+  });
+
+  test('L1 難度說明有標示中文品名會透露劑型', () => {
+    // L1 誘答刻意 shape／color 不相交，而中文品名幾乎都含劑型詞，
+    // 實測 22.4% 的題目可只靠劑型詞命中。這是知情接受的取捨，
+    // 但必須讓使用者看得到，否則分數會被誤讀為外觀辨識能力
+    $('btnAgain').click();
+    const html = $('levelPick').innerHTML;      // 卡片內容在容器的 innerHTML 上
+    const l1Block = html.slice(html.indexOf('data-level="L1"'), html.indexOf('data-level="L2"'));
+    assert.match(l1Block, /中文品名/);
+    assert.match(l1Block, /劑型/);
+  });
+});
+
+describe('C8 品名不得洩漏到 L2 的格子', () => {
+  before(needPool);
+
+  test('L2 四宮格作答前不含任何選項的英文或中文品名', () => {
+    // L2 是「給藥名選圖」，題幹本來就有品名；但格子本身作答前
+    // 不得出現任何品名，否則直接送分。
+    // 不能斷言「格子不含中文字」——alt 的中性描述（「選項 A 藥品外觀」）
+    // 本來就是中文，那樣寫會變成永遠失敗的錯誤斷言
+    const expected = startLevelDeterministic(Level.L2, 9201);
+    const grid = $('qGrid').innerHTML;
+    for (const o of expected[0].options) {
+      assert.ok(!grid.includes(o.ans), `L2 格子洩漏英文品名 ${o.ans}`);
+      assert.ok(!grid.includes(displayZh(o.zh)), `L2 格子洩漏中文品名 ${o.zh}`);
+    }
   });
 });
 

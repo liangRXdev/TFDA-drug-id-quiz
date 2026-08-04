@@ -116,7 +116,8 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 /* 選擇題選項 */
 .options { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 1.1rem; }
 .opt {
-  display: flex; align-items: center; gap: 0.6rem; width: 100%; text-align: left;
+  /* 兩行內容（英文品名 + 中文品名）時，序號要對齊第一行而不是垂直置中 */
+  display: flex; align-items: flex-start; gap: 0.6rem; width: 100%; text-align: left;
   min-height: 44px; padding: 0.6rem 0.8rem; font-family: var(--mono); font-size: 0.92rem;
   background: #fff; color: var(--text-primary); border: 1px solid var(--border); font-weight: 500;
   word-break: break-word;
@@ -126,6 +127,13 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   flex: none; display: inline-flex; align-items: center; justify-content: center;
   width: 1.6rem; height: 1.6rem; border-radius: 50%; background: var(--border);
   color: var(--text-muted); font-size: 0.75rem; font-weight: 700;
+}
+/* min-width:0 是 flex 子項能斷行的前提，少了它長品名會把按鈕撐出容器 */
+.opt .txt { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; flex: 1; }
+.opt .en { font-family: var(--mono); line-height: 1.35; }
+.opt .zh {
+  font-family: 'Noto Sans TC', sans-serif; font-size: 0.76rem; font-weight: 400;
+  color: var(--text-muted); line-height: 1.45;
 }
 .opt.ok { border-color: var(--success); background: rgba(39,174,96,0.08); }
 .opt.ok .key { background: var(--success); color: #fff; }

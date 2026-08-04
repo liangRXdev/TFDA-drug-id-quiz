@@ -14,6 +14,7 @@ import {
   buildIndex, eligibleKeys, drawLeveledQuiz, judgeChoice,
   pickEliminated, replaceOption, drawSpareQuestion, validateQuizInvariants,
   DECK_SIZE, buildLookAlikeIndex, lookAlikesOf, flipCard, drawDeck, drawSpareCard,
+  displayZh,
 } from './engine.js';
 
 const SCHEMA = 1;
@@ -35,8 +36,8 @@ const DATA_DIR = 'data/';
  */
 const LEVELS = {
   [Level.L1]: {
-    name: '簡單', badge: '簡單級', desc: '看圖，從四個藥名選一個',
-    meta: '亂猜基線 25 ｜ 無提示', choice: true, hint: false,
+    name: '簡單', badge: '簡單級', desc: '看圖，從四個藥名選一個（附中文品名）',
+    meta: '亂猜基線 25 ｜ 無提示 ｜ 中文品名可透露劑型', choice: true, hint: false,
     pass: 90, fair: 65,
   },
   [Level.L2]: {
@@ -320,13 +321,25 @@ function renderPhoto(q) {
     + (it.mark2 ? featureCell('標記二', it.mark2) : '');
 }
 
+/**
+ * L1 選項：英文品名 + 完整官方中文品名。
+ *
+ * 中文品名幾乎都含劑型詞，而 L1 的誘答刻意選 shape／color 不相交的藥
+ * （engine.js `candidateOk`），兩者一對，**實測 22.4% 的題目可只靠
+ * 「膠囊／錠」命中正解**。這是使用者知情後接受的取捨：L1 是入門級，
+ * 中文品名對臨床使用者有實際意義，而竄改官方品名的代價更高。
+ * 難度標示已在 LEVELS[L1] 標明，不讓分數被誤讀。
+ */
 function renderChoices(q) {
   show($('inputMode'), false);
   show($('qOptions'));
   $('qOptions').innerHTML = q.options.map((o, k) =>
     `<button class="opt" data-k="${k}">
        <span class="key">${OPT_KEYS[k]}</span>
-       <span>${escapeHtml(o.ans)}</span>
+       <span class="txt">
+         <span class="en">${escapeHtml(o.ans)}</span>
+         <span class="zh">${escapeHtml(displayZh(o.zh))}</span>
+       </span>
      </button>`).join('');
   $('qOptions').querySelectorAll('.opt').forEach((el) => {
     el.addEventListener('click', () => submitChoice(Number(el.dataset.k)));
