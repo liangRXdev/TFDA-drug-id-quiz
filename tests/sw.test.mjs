@@ -131,7 +131,7 @@ describe('C31 每批交付無條件升 CACHE 版本', () => {
     //       「這批沒新增資源所以不用升」的判斷不留給下一個人
     const m = /const CACHE = '([^']+)'/.exec(src);
     assert.ok(m, 'sw.js 必須有 const CACHE');
-    assert.equal(m[1], 'tfda-drug-id-quiz-v2', '本批（v4 批次 A）必須升到 v2');
+    assert.equal(m[1], 'tfda-drug-id-quiz-v3', '本批（批次 A 覆審修正）必須升到 v3');
   });
 
   test('shell 清單的每個資源都真的存在', async () => {

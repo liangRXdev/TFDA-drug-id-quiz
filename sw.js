@@ -24,7 +24,7 @@
  * `tests/sw.test.mjs` 的 C31 把這個字串釘死，改版時必須一併改，
  * 「這批沒新增資源所以不用升」的判斷不留給下一個人。
  */
-const CACHE = 'tfda-drug-id-quiz-v2';
+const CACHE = 'tfda-drug-id-quiz-v3';
 const SHELL = [
   './',
   'index.html',
