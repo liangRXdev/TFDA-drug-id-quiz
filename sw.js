@@ -18,7 +18,13 @@
  * `meta.schema` 對應 app.js 的 `SCHEMA` 常數），快取回舊 app.js 配新 pool
  * 會直接撞 schema 檢查而中止。網路可用時一律拿新的，快取只作為離線兜底。
  */
-const CACHE = 'tfda-drug-id-quiz-v1';
+/**
+ * **每一批交付都必須升版**，不設條件——
+ * 批次一定會動到 index.html／app.js／engine.js，三者都在 shell 清單內。
+ * `tests/sw.test.mjs` 的 C31 把這個字串釘死，改版時必須一併改，
+ * 「這批沒新增資源所以不用升」的判斷不留給下一個人。
+ */
+const CACHE = 'tfda-drug-id-quiz-v2';
 const SHELL = [
   './',
   'index.html',

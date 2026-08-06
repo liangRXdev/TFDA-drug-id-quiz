@@ -29,6 +29,53 @@ export const imgControl = {
   reset() { this.fail.clear(); this.pending.clear(); this.loaded.length = 0; },
 };
 
+/**
+ * localStorage 的控制盤（規格 v4 D25 的 E1–E7）。
+ *
+ * `calls` 記錄的是**每一次 mutation 嘗試**，不只 `setItem`——
+ * C22 要堵的正是「破紀錄前偷偷 removeItem 清掉未來 schema」這種
+ * 「沒有呼叫 setItem 所以看起來沒動」的實作。
+ */
+export const storeControl = {
+  map: new Map(),
+  calls: [],            // {op, key}，含 getItem
+  absent: false,        // E1：localStorage 根本不存在
+  throwOnAccess: null,  // 存取 property 本身就拋（第三方 cookie 被封鎖的 iframe）
+  throwOnGet: null,     // E2
+  throwOnSet: null,     // E3
+  throwOnRemove: null,  // E7 的移除失敗路徑
+  reset() {
+    this.map.clear();
+    this.calls.length = 0;
+    this.absent = false;
+    this.throwOnAccess = this.throwOnGet = this.throwOnSet = this.throwOnRemove = null;
+  },
+  /** 只算會改變內容的操作，供「零 mutation」斷言用 */
+  mutations() { return this.calls.filter((c) => c.op !== 'getItem'); },
+};
+
+const localStorageStub = {
+  getItem(k) {
+    storeControl.calls.push({ op: 'getItem', key: k });
+    if (storeControl.throwOnGet) throw storeControl.throwOnGet;
+    return storeControl.map.has(k) ? storeControl.map.get(k) : null;
+  },
+  setItem(k, v) {
+    storeControl.calls.push({ op: 'setItem', key: k });
+    if (storeControl.throwOnSet) throw storeControl.throwOnSet;
+    storeControl.map.set(k, String(v));
+  },
+  removeItem(k) {
+    storeControl.calls.push({ op: 'removeItem', key: k });
+    if (storeControl.throwOnRemove) throw storeControl.throwOnRemove;
+    storeControl.map.delete(k);
+  },
+  clear() {
+    storeControl.calls.push({ op: 'clear', key: null });
+    storeControl.map.clear();
+  },
+};
+
 class El {
   constructor(id, tag = 'div') {
     this.id = id;
@@ -150,11 +197,15 @@ export function installDom() {
   // Canvas 樁：記錄所有 fillText 的內容，用來證明級別與基線**真的被畫進成績卡**，
   // 而不是只出現在頁面 DOM 上（C13 的弱化實作正是後者）。
   const drawn = [];
+  // 「成績卡不含任何藥品圖片」（v2 D7）必須驗**有沒有嘗試畫**，
+  // 不能只驗「畫的不是跨域圖片」——後者允許畫別的藥品圖片
+  const drawnImages = [];
   const canvas = get('cardCanvas');
   canvas.getContext = () => new Proxy({}, {
     get: (_, p) => {
       if (p === 'measureText') return () => ({ width: 60 });
       if (p === 'fillText') return (t) => drawn.push(String(t));
+      if (p === 'drawImage' || p === 'createPattern') return () => drawnImages.push(String(p));
       return () => {};
     },
     set: () => true,
@@ -169,6 +220,15 @@ export function installDom() {
     fonts: { ready: Promise.resolve() },
   };
   globalThis.window = { scrollTo() {} };
+  // 用 getter 而不是直接指派：E1（不存在）與「存取 property 本身就拋」
+  // 兩種失效都必須測得到，而那兩種在真實瀏覽器都發生在**還沒呼叫任何方法**之前
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    get() {
+      if (storeControl.throwOnAccess) throw storeControl.throwOnAccess;
+      return storeControl.absent ? undefined : localStorageStub;
+    },
+  });
   globalThis.URL.createObjectURL = () => 'blob:stub';
   globalThis.URL.revokeObjectURL = () => {};
   globalThis.fetch = async (u) => ({
@@ -180,7 +240,9 @@ export function installDom() {
   return {
     $: get,
     drawn,
+    drawnImages,
     img: imgControl,
+    store: storeControl,
     hidden: (id) => get(id).classList.contains('hidden'),
     cells: () => get('qGrid').querySelectorAll('.cell'),
     /** 讓所有已排定的 microtask 跑完 */

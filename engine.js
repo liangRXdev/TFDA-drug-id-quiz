@@ -926,3 +926,104 @@ export function drawSpareCard({ index, exclude, token, rng = Math.random }) {
   if (!keys.length) return null;
   return newCard(pick(index.byAns.get(pick(keys, rng)), rng), token);
 }
+
+// ── 連對 streak（規格 v4 D23）─────────────────────────────────────────
+
+/**
+ * 哪些題參與 streak：**只有進入 LOCKED 的題**。
+ *
+ * VOID 跳過（不 +1、不歸零）的理由與 `scoreQuiz` 排除 VOID 相同——
+ * 作廢是資源載入失敗，不是使用者的作答；若中斷 streak，等於讓網路狀況決定成績表現。
+ * PENDING／HINTED 同樣跳過：那是「還沒作答」，不是「答錯」。
+ * 走完的回合裡不存在非終態題，這條只在 live 顯示的中途狀態下會用到。
+ */
+const inStreak = (q) => !!q && q.state === QState.LOCKED;
+
+/**
+ * 全卷最長連對段。
+ *
+ * @returns {{length: number, hinted: number}}
+ *   `hinted` 是**被選中那一段之內**用過提示的題數，不是全卷提示總數——
+ *   結算頁寫的是「最長連對 N 題（含 M 題提示）」，M 若取全卷值就與 N 無關了。
+ *   同長度的段落有多個時取**最早出現**的那一段（比較用嚴格大於）。
+ *
+ * 用了提示仍 +1：提示已在分數層扣過（1.0→0.5），在 streak 再罰一次是雙重懲罰，
+ * 會誘導使用者不敢用提示而硬猜——那正是本專案最怕的失效模式。
+ *
+ * **不快取、不增量**。遞補（`voidCurrent` 的 push）會改變陣列組成，
+ * 增量值屆時已經算錯而且無從察覺。
+ */
+export function longestStreak(questions) {
+  let best = { length: 0, hinted: 0 };
+  let length = 0;
+  let hinted = 0;
+  for (const q of questions || []) {
+    if (!inStreak(q)) continue;
+    if (!q.correct) { length = 0; hinted = 0; continue; }
+    length++;
+    if (q.mark === HINTED_MARK) hinted++;
+    if (length > best.length) best = { length, hinted };
+  }
+  return best;
+}
+
+/**
+ * `questions[0 .. upTo-1]`（**upTo 為 exclusive**）末端的連對長度，供答題頁 header 用。
+ *
+ * upTo 省略或非整數時視為整個陣列；超過長度會夾住；負值回 0。
+ */
+export function currentStreak(questions, upTo) {
+  const qs = questions || [];
+  const end = Number.isInteger(upTo) ? Math.min(upTo, qs.length) : qs.length;
+  let n = 0;
+  for (let i = end - 1; i >= 0; i--) {
+    if (!inStreak(qs[i])) continue;
+    if (!qs[i].correct) break;
+    n++;
+  }
+  return n;
+}
+
+// ── 結算稱號（規格 v4 D24）───────────────────────────────────────────
+
+/** 分數帶下界，由高到低。與 `RANK_TITLES` 每列一一對應 */
+export const RANK_BANDS = [95, 80, 50];
+
+/**
+ * 最低帶三級共用同一句。
+ *
+ * 這**不是**稱號而是下一步建議：最低帶不存在「刷簡單級拿高階稱號」的誘因，
+ * 而三級都該給同一個建議。因此 D24 的「各級不相交」只約束 ≥50 的 9 格，
+ * 這一列刻意相同並由 A28 正面斷言，避免日後被當成漏寫而各自改掉。
+ */
+const RANK_LOW = '先從閃卡開始';
+
+/**
+ * 稱號表。**這張表就是唯一真相**——不另建「等級序數」再去證明單調：
+ * 序數可以任意指定，與使用者實際看到的字串沒有可證明的關聯，那會是第二份真相。
+ * 跨級之間不宣稱任何排序（D26），因此稱號在畫面上永遠與級別徽章同框。
+ *
+ * 用字為**暫定**，定案前須做一次人工法規覆核並留檔（見 `.ai-review/rank-title-review.md`）。
+ */
+export const RANK_TITLES = {
+  [Level.L1]: ['牌面熟手', '記得住外觀', '還在對圖', RANK_LOW],
+  [Level.L2]: ['對得很快', '看得出門道', '還在比對', RANK_LOW],
+  [Level.L3]: ['一眼認藥', '火眼金睛', '還在翻仕單', RANK_LOW],
+};
+
+/**
+ * 查表取稱號。**純查表，不做任何計算。**
+ *
+ * @returns {string} 非法 level 或非有限分數一律回空字串（呼叫端據此隱藏元素）。
+ *   分數超出 [0, 100] 不視為非法——照分數帶落點處理即可，
+ *   多一條「範圍檢查」只是替 UI 製造第二種需要處理的失敗。
+ */
+export function rankTitle(level, score) {
+  const row = RANK_TITLES[level];
+  if (!row) return '';
+  if (typeof score !== 'number' || !Number.isFinite(score)) return '';
+  for (let i = 0; i < RANK_BANDS.length; i++) {
+    if (score >= RANK_BANDS[i]) return row[i];
+  }
+  return row[RANK_BANDS.length];
+}

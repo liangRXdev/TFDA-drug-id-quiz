@@ -67,7 +67,7 @@ Q4 與 Q5 是刻意的：只憑「圓形／白色／無刻痕」無法唯一辨�
 需 Node ≥22（`node --test` 的 glob 展開自 Node 21 起才有）。
 
 ```bash
-npm test                 # engine、難度分級、閃卡、UI 接線與 SW 界線（190 項）
+npm test                 # engine、難度分級、閃卡、UI 接線、娛樂性強化與 SW 界線（272 項）
 npm run build:pool       # 抓取來源 → data/pool.json
 npm run fetch:images     # 鏡像圖片 → data/img/*.webp（需 uv）
 npm run verify           # 資料完整性驗證

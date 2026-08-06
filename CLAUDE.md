@@ -69,10 +69,51 @@
 
 house style 的「全部工具都是 PWA」現在適用了，但**僅限可安裝這一層**。
 
+**每一批交付都要升 `sw.js` 的 `CACHE` 版本**，並同步改 `tests/sw.test.mjs` 的 C31
+（那條把版本字串釘死，不設條件）。批次一定會動到 shell 內的檔案，
+「這批沒新增資源所以不用升」的判斷不留給下一個人。
+
+## CSS 與 layout 不能寫成自動測試
+
+`tests/_ui-harness.mjs` 的 `style` 是純物件，沒有 `getComputedStyle`、
+`getBoundingClientRect`、`matchMedia`，而且**刻意不引入 jsdom**（零依賴）。
+任何依賴 cascade、media query 或幾何的斷言寫在這個樁上**必然是永遠綠的假斷言**，
+比沒有測試更糟——後人會以為那條守住了。
+
+處理方式分兩層：**靜態 CSS 原始碼契約**（自動，見 `tests/engagement.test.mjs`
+與 `ui-smoke.test.mjs` 的 C17）＋**人工瀏覽器留檔**（字級對比、reduced-motion
+兩態、動畫期間的 flow 位移、375px 版面）。
+
+解析 CSS 前**必須先剝掉註解**：規則前面的說明註解會被當成 selector 的一部分，
+而寫著「不做 `@keyframes`」的註解本身會讓「CSS 內不得出現 @keyframes」恆紅。
+
+`getBoundingClientRect` 這條另有一個假陽性：真實的 rect **包含 transform**，
+會把刻意允許的 `scale` 誤判成 flow 位移。要驗位移得量相鄰錨點的佔位，不是量矩形。
+
+## 動態效果一律正向表列
+
+`index.html` 內的 `transition`／`animation` 只准出現在
+`@media (prefers-reduced-motion: no-preference)` 這一個 block 裡，**含既有的**
+button background 與 `.bar > i` width 兩條——reduced-motion 是使用者的無障礙偏好，
+對「哪些動畫是哪一批加的」不感興趣。這條由靜態契約 C25／C27 守著，
+新增動畫時要一併加進那兩條測試的 selector 清單。
+
+不做 `@keyframes`：作答畫面上一個不會停的動畫是持續的干擾源。
+
+## localStorage：前綴、精確 key、讀不到就不寫
+
+key 是 `tfda-drug-id-quiz:records`。**前綴不可省**——本站與 pharmacy-portal
+的十幾個工具同源，storage 是整站共用的。清除只能 `removeItem` 那一個精確 key，
+不可 `clear()`、不可前綴掃描（今日無害，新增 `:settings` 那天就會誤刪）。
+
+**讀取失敗時不得寫入**：讀不到不代表沒有紀錄，照寫等於用看不見的舊快照覆蓋掉
+更好的成績，而使用者要到下次開啟才會發現最佳成績退步了。同理，讀到壞 JSON
+或未來 schema 時**不做任何 mutation**——順手清掉等於把新版本寫的資料靜默刪除。
+
 ## 指令
 
 ```bash
-npm test                 # engine + 難度分級 + 閃卡 + UI 接線 + SW 界線（180 項）；需 Node ≥22（glob）
+npm test                 # engine + 難度分級 + 閃卡 + UI 接線 + 娛樂性強化 + SW 界線（272 項）；需 Node ≥22（glob）
 npm run build:pool       # 抓來源 → 產 data/pool.json
 npm run fetch:images     # 鏡像圖片（uv + Pillow）
 npm run verify           # 資料完整性（B 組）
