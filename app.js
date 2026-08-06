@@ -1058,7 +1058,7 @@ function finishFlash(note = '', shown = state.deck.length) {
     + `看過 ${shown} / ${DECK_SIZE} 張，翻開 ${flipped} 張`
     + (withAlts ? `　·　其中 ${withAlts} 張的外觀另有相似品項` : '')
     + '　·　閃卡不計分，成績請走測驗模式。';
-  window.scrollTo({ top: 0, behavior: 'smooth' });
+  window.scrollTo(0, 0);        // 動畫一律走 CSS 正向表列，JS 不得自帶（規格 D27 條 5）
 }
 
 function quitFlash() {
@@ -1144,7 +1144,7 @@ function finish() {
     : '';
   show($('recordFlash'), fresh.length > 0);
 
-  window.scrollTo({ top: 0, behavior: 'smooth' });
+  window.scrollTo(0, 0);        // 同上（D27 條 5）
 }
 
 // ── 成績卡（純 Canvas，不含任何跨域圖片 — 規格 D7）───────────────────
@@ -1289,7 +1289,7 @@ function backToStart() {
   show($('start'));
   resetLevel();                 // 每回合都必須重新選級別（規格 §6.1）
   renderRecords();              // 剛結束的回合可能剛破紀錄，回起始頁要看得到
-  window.scrollTo({ top: 0, behavior: 'smooth' });
+  window.scrollTo(0, 0);        // 同上（D27 條 5）
 }
 
 $('btnStart').addEventListener('click', startQuiz);

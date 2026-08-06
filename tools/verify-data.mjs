@@ -23,7 +23,16 @@ const fails = [];
 const fail = (code, msg) => fails.push(`[${code}] ${msg}`);
 const ok = (msg) => console.log(`  ✓ ${msg}`);
 
-/** WebP 檔頭解析：證明「可解碼且符合資產契約」，非只是「存在」（規格 B5） */
+/**
+ * WebP **容器結構**解析：RIFF 長度、WEBP 標記、第一個 chunk 的 header 與尺寸。
+ *
+ * 〔CR-2〕這裡刻意**不宣稱「可解碼」**。本函式從不觸碰壓縮位元流，
+ * 「header 合法但位元流損毀」的檔案會全數通過。真正的解碼證據來自
+ * `tools/fetch-images.py` 的 `verify_asset()`（Pillow 完整 decode）——
+ * 新寫出的每一張都驗，`--verify-all` 的季度全跑再對既有檔案驗一次。
+ *
+ * 這道檢查仍有價值：它抓截斷與尺寸違約，而且不需要 Python 執行環境。
+ */
 function readWebp(buf) {
   if (buf.length < 30) throw new Error('檔案過小');
   if (buf.toString('ascii', 0, 4) !== 'RIFF') throw new Error('非 RIFF 容器');
@@ -68,6 +77,18 @@ function main() {
   if (timeish.length) fail('B7', `meta 含執行時間欄位，會破壞冪等：${timeish.join(', ')}`);
   else ok('meta 不含執行時間（冪等）');
 
+  // 〔SC-2〕source_version 來自 ZIP 中央目錄的 DOS 日期，是來源端的資料產生日。
+  // 這條只擋**格式漂移**：擋不住「有人改拿執行日填進去」——那靠的是 build-pool
+  // 只從 ZIP 位元組取值這個結構性保證（見 dosDateToISO 的註解）。
+  // 缺欄位不擋：ZIP 沒有合法日期時 build-pool 刻意不寫，而版本字串只影響顯示，
+  // 為了一個顯示欄位擋掉整批資料更新不成比例（結構災難硬擋、格式漂移放行）
+  if (!('source_version' in pool.meta)) {
+    console.log('  · meta 無 source_version，C6 的資料版本不顯示'
+      + '（pool 由 SC-2 之前的管線建置，或來源 ZIP 未帶合法日期——重跑 build:pool 可分辨）');
+  } else if (!/^\d{4}-\d{2}-\d{2}$/.test(pool.meta.source_version)) {
+    fail('C6', `meta.source_version 格式應為 YYYY-MM-DD，實得 ${JSON.stringify(pool.meta.source_version)}`);
+  } else ok(`meta.source_version = ${pool.meta.source_version}（來源 ZIP 的資料產生日）`);
+
   // ── B4：資產鍵唯一且可證明由該筆產生 ──────────────────────────────
   const seen = new Map();
   let keyMismatch = 0;
@@ -85,7 +106,7 @@ function main() {
   if (!keyMismatch) ok('每筆資產鍵皆可由其許可證字號重算得出（一對一）');
   else fail('B6', `共 ${keyMismatch} 筆資產鍵與許可證字號不對應`);
 
-  // ── B5：資產可解碼且符合輸出契約 ──────────────────────────────────
+  // ── B5：資產容器結構合法且符合輸出契約 ────────────────────────────
   let missing = 0, bad = 0, oversize = 0, total = 0;
   const noHash = [];
   for (const it of items) {
@@ -102,13 +123,15 @@ function main() {
       }
     } catch (e) {
       bad++;
-      if (bad <= 5) fail('B5', `${it.img} 無法解碼：${e.message}`);
+      if (bad <= 5) fail('B5', `${it.img} 容器結構不合法：${e.message}`);
     }
     if (!it.src_sha256) noHash.push(it.id);
   }
   if (missing) fail('B5', `${missing} 筆資產不存在（請執行 npm run fetch:images）`);
   else ok(`全部 ${items.length.toLocaleString()} 張資產存在`);
-  if (!bad && !missing) ok('全部資產可解碼且為合法 WebP');
+  // 〔CR-2〕原文是「全部資產可解碼且為合法 WebP」——宣稱強於證據。
+  // 這裡只讀 header，沒碰壓縮位元流，「可解碼」由 fetch-images.py 的 verify_asset() 負責
+  if (!bad && !missing) ok('全部資產的 WebP 容器結構合法（未解壓位元流，解碼由 fetch-images 驗）');
   if (!oversize && !missing) ok(`全部資產長邊 ≤${MAX_EDGE}px`);
 
   if (noHash.length) fail('B6', `${noHash.length} 筆缺 src_sha256（無法證明來源對應）：${noHash.slice(0, 3).join(', ')}…`);

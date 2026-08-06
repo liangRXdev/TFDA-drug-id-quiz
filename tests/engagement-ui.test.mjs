@@ -12,7 +12,7 @@
  * 樁的 `getElementById` 會**自動生出**沒宣告過的元素，因此忘記改 index.html 時
  * 這裡仍會全綠——那個假綠燈由 `engagement.test.mjs` 的「新增 DOM 掛點」那組守著。
  */
-import { test, describe, before } from 'node:test';
+import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -45,6 +45,14 @@ const stored = () => {
   const raw = store.map.get(KEY);
   return raw == null ? null : JSON.parse(raw);
 };
+
+/**
+ * 〔TG-4〕`startLevel()` 覆寫 `Math.random` 後**刻意不即時還原**——
+ * 還原了後續的作廢遞補、誘答重抽就不再是已知序列，測試也就無從預期正解格。
+ * 但整份檔跑完必須還原，否則同一 process 內的其他檔會拿到被釘住的 RNG。
+ */
+const REAL_RANDOM = Math.random;
+after(() => { Math.random = REAL_RANDOM; });
 
 /** 走一條**已知**的 RNG 序列，測試因而事先知道每題的正解格 */
 function startLevel(level, seed) {
@@ -116,6 +124,20 @@ const P_60_8 = 'TTTTTTTTFTTTTFFFFFFF';   // 12 對 → 60 分，最長連對 8
 const P_75_3 = 'TTTFTTTFTTTFTTTFTTTF';   // 15 對 → 75 分，最長連對 3
 const P_50_10 = 'TTTTTTTTTTFFFFFFFFFF';  // 10 對 → 50 分，最長連對 10
 const P_75_10 = 'TTTTTTTTTTFTTTTTFFFF';  // 15 對 → 75 分，最長連對 10
+const P_ALL = 'T'.repeat(QUIZ_SIZE);      // 20 對 → 100 分，最長連對 20
+
+/**
+ * C20 對每一條失效情境的共同要求：完整回合走到結算、分數與逐題檢討完整渲染、
+ * 無未捕捉例外。〔TG-6〕原本定義在 C20 的 describe 內，E7 在 C21 用不到，
+ * 這是 E7 當初只驗清除流程的直接原因——提到模組層。
+ */
+const assertResultIntact = () => {
+  assert.ok(!hidden('result'), '未走到成績頁');
+  assert.match($('resultMetrics').innerHTML, /總分/, '分數未渲染');
+  assert.match($('resultMetrics').innerHTML, /最長連對/, '最長連對未渲染');
+  assert.match($('reviewBody').innerHTML, /<tr>/, '逐題檢討空白');
+  assert.ok(hidden('fatal'), '觸發了中止畫面');
+};
 
 describe('C18 最佳紀錄的兩個交叉方向、相等、讀回顯示', () => {
   before(needPool);
@@ -175,7 +197,14 @@ describe('C18 最佳紀錄的兩個交叉方向、相等、讀回顯示', () => 
 });
 
 describe('C19 三級各自路由', () => {
-  before(needPool);
+  // 〔TG-4〕原本直接讀 C18 留下的 `stored().L1`——跨 describe 順序耦合，
+  //         `store.reset()` 只清 localStorage 樁、不重建 app module 與 state，
+  //         所以單獨跑這個 describe 會在第一行就 TypeError。改為自備前置。
+  before(() => {
+    needPool();
+    store.reset();
+    playL1(1901, P_60_8);        // L1 = 60 分／連對 8
+  });
 
   test('L2 的紀錄不得寫進 L1／L3', async () => {
     // 〔堵〕把三級結果全寫進同一個欄位——只測 L1 是看不出來的
@@ -210,12 +239,23 @@ describe('C19 三級各自路由', () => {
 describe('C33 跨分頁寫入合併', () => {
   before(needPool);
 
-  test('另一個分頁已寫入更高值時，本頁不得倒退覆蓋', () => {
-    // 〔堵〕直接以記憶體快照整包覆寫，另一分頁剛創的紀錄被倒退
+  /**
+   * 建立基準紀錄（75 分／連對 10），讓本頁持有這份**舊**快照，
+   * 然後模擬另一分頁直接改寫 storage。
+   * 〔TG-4〕原本沿用前面 describe 留下的紀錄，單獨跑這個 describe 會取不到值。
+   */
+  const foreignWrite = (patch) => {
+    store.reset();
+    playL1(3000, P_75_10);
     $('btnAgain').click();                       // 此刻本頁持有的是舊快照
     const rec = stored();
-    rec.L1.bestStreak = { value: 18, date: '2026-01-01', pool: POOL_HASH };
+    Object.assign(rec.L1, patch);
     store.map.set(KEY, JSON.stringify(rec));     // 模擬另一分頁的寫入
+  };
+
+  test('另一分頁提高 bestStreak／本頁提高 bestScore → 連對不得倒退', () => {
+    // 〔堵〕直接以記憶體快照整包覆寫，另一分頁剛創的紀錄被倒退
+    foreignWrite({ bestStreak: { value: 18, date: '2026-01-01', pool: POOL_HASH } });
 
     // 16 對 → 80 分（高於既有 75），最長連對 4（低於 18）
     playL1(3001, 'TTTTFTTTTFTTTTFTTTTF', { reset: false });
@@ -225,19 +265,24 @@ describe('C33 跨分頁寫入合併', () => {
     assert.equal(after.L1.bestStreak.value, 18, '另一分頁的更高連對被倒退覆蓋了');
     assert.equal(after.L1.bestStreak.date, '2026-01-01', 'date 也不得被覆蓋');
   });
+
+  test('另一分頁提高 bestScore／本頁提高 bestStreak → 分數不得倒退', () => {
+    // 〔TG-5〕只有上面那一個方向的話，「對 streak 重讀、對 score 沿用舊快照」
+    //         的弱化實作可以全過——與 C18 當初特意補兩個交叉方向同一個道理
+    foreignWrite({ bestScore: { value: 95, date: '2026-01-01', pool: POOL_HASH } });
+
+    // 18 對 → 90 分（低於 95），最長連對 18（高於 10）
+    playL1(3002, 'T'.repeat(18) + 'FF', { reset: false });
+
+    const after = stored();
+    assert.equal(after.L1.bestStreak.value, 18, '連對應更新');
+    assert.equal(after.L1.bestScore.value, 95, '另一分頁的更高分數被倒退覆蓋了');
+    assert.equal(after.L1.bestScore.date, '2026-01-01', 'date 也不得被覆蓋');
+  });
 });
 
 describe('C20 失效情境 E1–E7 逐條', () => {
   before(needPool);
-
-  /** 每一條都必須：完整回合走到結算、分數與逐題檢討完整渲染、無未捕捉例外 */
-  const assertResultIntact = () => {
-    assert.ok(!hidden('result'), '未走到成績頁');
-    assert.match($('resultMetrics').innerHTML, /總分/, '分數未渲染');
-    assert.match($('resultMetrics').innerHTML, /最長連對/, '最長連對未渲染');
-    assert.match($('reviewBody').innerHTML, /<tr>/, '逐題檢討空白');
-    assert.ok(hidden('fatal'), '觸發了中止畫面');
-  };
 
   test('E1 localStorage 不存在 → 靜默降級，其餘照常', () => {
     store.reset();
@@ -314,6 +359,20 @@ describe('C20 失效情境 E1–E7 逐條', () => {
     assert.ok(html.includes('困難級'), 'L3 應保留');
     assert.ok(!html.includes('中級'), '損毀的 L2 不得顯示');
     assert.ok(html.includes('90.0') && html.includes('12 題'), 'L1 原值未保留');
+
+    // 〔TG-6〕C20 明寫「每條皆須：完整回合可走到結算、分數與逐題檢討完整渲染」，
+    //         E6 原本只驗起始頁讀取就結束。刻意選會**破紀錄**的回合——
+    //         寫回路徑才是風險所在：整包覆寫會連同 L3 的原值一起洗掉，
+    //         而那正是 E6 承諾「其他難度原值保留」的地方
+    playL1(4006, P_ALL);
+    assertResultIntact();
+    assert.ok(!hidden('recordFlash'), '100 分卻沒認定為新紀錄');
+    const rec = stored();
+    assert.equal(rec.L1.bestScore.value, 100, 'L1 新紀錄未寫入');
+    assert.equal(rec.L1.bestStreak.value, QUIZ_SIZE);
+    assert.equal(rec.L3.bestScore.value, 70, '寫回 L1 時洗掉了 L3 的最高分');
+    assert.equal(rec.L3.bestStreak.value, 5, '寫回 L1 時洗掉了 L3 的最長連對');
+    assert.equal(rec.L3.bestScore.date, '2026-08-01', 'L3 的 date 也不得被動到');
   });
 
   test('E6b 不符 predicate 的值（超界、非整數、日期格式錯）一律降級', () => {
@@ -415,6 +474,23 @@ describe('C21 清除紀錄：精確 key 與取消路徑', () => {
     assert.match($('recordsNote').textContent, /失敗/);
     assert.ok(!hidden('recordsBox'), '紀錄還在就應該繼續顯示');
     store.throwOnRemove = null;
+  });
+
+  test('E7 清除後仍可走完整回合，並重新建立紀錄', () => {
+    // 〔TG-6〕E7 原本只驗清除流程本身，沒有走過 C20 要求的完整回合。
+    //         清除把 in-memory 快照與 storage 同時歸零，是「回合中途讀到
+    //         自己剛清掉的東西」最容易炸的一條路徑
+    seed();
+    $('btnClearRecords').click();
+    $('btnClearYes').click();
+    assert.ok(hidden('recordsBox'), '前置條件：紀錄已清除');
+
+    playL1(4007, P_60_8);
+    assertResultIntact();
+    assert.ok(!hidden('recordFlash'), '清除後的第一個回合必定是新紀錄');
+    const rec = stored();
+    assert.equal(rec.L1.bestScore.value, 60);
+    assert.equal(rec.L1.bestStreak.value, 8);   // 清除前是 88／9，復活的話這兩條會紅
   });
 });
 

@@ -182,9 +182,9 @@ describe('A27 與 scoreQuiz 的一致性（具名反例，不用隨機 property�
 
 /** D24 的表就是唯一真相：這裡把 12 格逐一寫死，不從實作反推 */
 const TITLES = {
-  L1: ['牌面熟手', '記得住外觀', '還在對圖', '先從閃卡開始'],
-  L2: ['對得很快', '看得出門道', '還在比對', '先從閃卡開始'],
-  L3: ['一眼認藥', '火眼金睛', '還在翻仕單', '先從閃卡開始'],
+  L1: ['入門攻克', '記得住外觀', '還在對圖', '先從閃卡開始'],
+  L2: ['辨識高手', '看得出門道', '還在比對', '先從閃卡開始'],
+  L3: ['火眼金睛', '一眼認藥', '還在背藥名', '先從閃卡開始'],
 };
 const LEVELS3 = [Level.L1, Level.L2, Level.L3];
 /** 各分數帶的代表分數，順序與 TITLES 的欄位一致 */
@@ -297,6 +297,13 @@ describe('A29 封閉黑名單（法定／認證職稱）', () => {
     const MASTERY = [
       '精通', '精熟', '熟練', '專精', '專家', '大師', '宗師', '權威', '達人',
       '頂尖', '無敵', '完美', '滿分', '神級', '王者', '冠軍', '第一名', '專業級',
+      // 〔2026-08-06 人工覆核裁示補入〕原表的 L1 ≥95 是「牌面熟手」，
+      // 黑名單收了「熟練」卻沒收「熟手」，因此**放行了一個該擋的字**——
+      // 靠人工覆核才抓到。規格 D24 條 3（v4.3）已寫明裁決：
+      // 「熟手」的「熟」與「熟練」同義且落在簡單級最高帶 → 視為精熟意涵，收錄；
+      // 「高手」指相對表現位階、不宣稱能力已臻精熟，且 L2 難度已排除刷分路徑 → **不收錄**
+      // （收了就與 L2 ≥95「辨識高手」的定案直接衝突）。
+      '熟手',
     ];
     for (const lv of [Level.L1, Level.L2]) {
       for (const t of TITLES[lv].slice(0, 3)) {
@@ -330,6 +337,12 @@ const HTML = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
 const CSS = HTML.slice(HTML.indexOf('<style>'), HTML.indexOf('</style>'))
   .replace(/\/\*[\s\S]*?\*\//g, '');
 
+/** 同理剝掉 JS 註解——否則講「不得用 behavior: 'smooth'」的註解會讓契約恆紅。
+ *  行註解的 `[^:]` 前綴是為了不誤切 `https://` */
+const APPJS = fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8')
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+
 /** 取出 @media 區塊的內容（要數大括號——裡面本來就有巢狀規則） */
 function mediaBlock(css, query) {
   const at = css.indexOf(`@media (${query})`);
@@ -349,6 +362,19 @@ const rulesOf = (css) => [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
 
 const propsOf = (body) => [...body.matchAll(/([a-z-]+)\s*:/g)].map((m) => m[1]);
 
+/**
+ * 全檔（含 `@media` 內）收集 selector 命中的**所有**規則。
+ * 〔TG-2／TG-3〕原本用 `rulesOf(CSS).find(...)` 只驗第一條宣告，
+ * 而 `index.html` 已存在 `@media (max-width: 480px)` 且該 block 內本來就在覆寫
+ * `font-size`——在那裡多加一條覆寫是這個檔案的既有編輯習慣，會自然踩到這個洞。
+ */
+const rulesMatching = (re) => rulesOf(CSS)
+  .filter((r) => r.sel.split(',').some((s) => re.test(s.trim())));
+
+/** 取出所有 `color:` 宣告（排除 border-color／background-color 這類複合屬性） */
+const colorsOf = (body) => [...body.matchAll(/(?:^|[;{\s])color\s*:\s*([^;]+)/g)]
+  .map((m) => m[1].trim());
+
 /** 單位一律換算成 rem 比較（本專案的字級全用 rem） */
 function remOf(body, prop = 'font-size') {
   const m = new RegExp(`${prop}\\s*:\\s*([\\d.]+)rem`).exec(body);
@@ -356,23 +382,30 @@ function remOf(body, prop = 'font-size') {
 }
 
 describe('C23b 稱號的視覺層級（靜態契約）', () => {
-  test('稱號字級不大於三級判定的字級', () => {
+  test('稱號字級不大於三級判定的字級（全檔，含所有 @media 覆寫）', () => {
     // 〔堵〕F13——樁上沒有 cascade，寫 getComputedStyle 必然假綠。
     //       這裡只驗宣告值，**實際渲染字級與對比另做人工瀏覽器留檔**
-    const rules = rulesOf(CSS);
-    const rank = rules.find((r) => r.sel === '.rank-title');
-    const interp = rules.find((r) => r.sel === '.metric .interp');
-    assert.ok(rank, '缺少 .rank-title 規則');
-    assert.ok(interp, '缺少 .metric .interp 規則');
-    const a = remOf(rank.body);
-    const b = remOf(interp.body);
-    assert.ok(a !== null && b !== null, '兩者都必須明確宣告 font-size');
-    assert.ok(a <= b, `稱號字級 ${a}rem 大於三級判定 ${b}rem`);
+    // 〔TG-2〕改掃全檔：只取第一條的話，480px block 內加一條放大覆寫就溜過去了
+    const rankSizes = rulesMatching(/^\.rank-title$/).map((r) => remOf(r.body)).filter((v) => v !== null);
+    const interpSizes = rulesMatching(/^\.metric \.interp$/).map((r) => remOf(r.body)).filter((v) => v !== null);
+    assert.ok(rankSizes.length, '.rank-title 必須明確宣告 font-size');
+    assert.ok(interpSizes.length, '.metric .interp 必須明確宣告 font-size');
+    // 保守契約：**任一處**的稱號字級都不得超過**任一處**的三級判定字級。
+    // 不模擬 cascade（F13：樁上根本沒有 cascade）。寧可過嚴——
+    // 過嚴會逼人回來改規格，過鬆則是威脅模型第 3 條（讓使用者高估自己的能力）
+    const maxRank = Math.max(...rankSizes);
+    const minInterp = Math.min(...interpSizes);
+    assert.ok(maxRank <= minInterp,
+      `稱號字級最大 ${maxRank}rem 大於三級判定最小 ${minInterp}rem`);
   });
 
-  test('稱號用 muted 色，不得用 accent／danger 這類強調色', () => {
-    const rank = rulesOf(CSS).find((r) => r.sel === '.rank-title');
-    assert.match(rank.body, /color:\s*var\(--text-muted\)/);
+  test('稱號用 muted 色，不得用 accent／danger 這類強調色（全檔）', () => {
+    const rules = rulesMatching(/^\.rank-title$/);
+    const colors = rules.flatMap((r) => colorsOf(r.body));
+    assert.ok(colors.length, '.rank-title 必須明確宣告 color');
+    for (const c of colors) {
+      assert.equal(c, 'var(--text-muted)', `.rank-title 的 color 宣告為 ${c}`);
+    }
   });
 
   test('稱號與級別徽章在同一個容器內（DOM 契約）', () => {
@@ -409,6 +442,22 @@ describe('C25 reduced-motion 的完整 selector 清單（靜態契約）', () =>
     assert.doesNotMatch(outside, /animation\s*:/, 'block 外仍有 animation 宣告');
     assert.doesNotMatch(CSS, /@keyframes/, 'D27 已列 @keyframes 為非目標');
   });
+
+  test('app.js 不得自帶動畫（D27 條 5）', () => {
+    // 〔TG-1〕這條原本不存在，三處 window.scrollTo({ behavior: 'smooth' })
+    //         因此全部通過上面那條——**已經發生過的假陰性**。
+    //         樁的 window.scrollTo 是空函式，行為測試同樣抓不到，只能做靜態契約。
+    //         正向表列以 CSS @media 為載體，JS 端動畫繞過整套 reduced-motion 管控
+    for (const [re, why] of [
+      [/behavior\s*:/, "捲動動畫（改用 window.scrollTo(0, 0)）"],
+      [/scrollIntoView\s*\(\s*\{/, 'scrollIntoView 帶選項物件'],
+      [/\.animate\s*\(/, 'Web Animations API'],
+      [/requestAnimationFrame/, 'requestAnimationFrame 驅動的視覺補間'],
+    ]) {
+      assert.doesNotMatch(APPJS, re,
+        `app.js 出現 ${why}——動畫一律留在 CSS 的 no-preference 正向表列內`);
+    }
+  });
 });
 
 describe('C27 動畫不得造成 document flow 位移（靜態契約）', () => {
@@ -442,6 +491,30 @@ describe('C27 動畫不得造成 document flow 位移（靜態契約）', () => 
     const n = rulesOf(CSS).find((r) => r.sel === '.streak .n');
     assert.match(n.body, /display:\s*inline-block/, 'transform 對 inline 元素無效');
     assert.doesNotMatch(n.body, /font-size/, '改字級會推動同列元素');
+  });
+
+  test('狀態 selector 在全檔任何位置都不得動到佔位屬性', () => {
+    // 〔TG-3〕上面兩條只迭代 reduced-motion block **內**的規則：
+    //         把 `.streak.pop .n { font-size: 2rem }` 寫在 block 外，
+    //         C27 不掃（不在 block 內）、C25 也不掃（不是 transition／animation）。
+    //         狀態 selector 只該換顏色，佔位屬性一律歸基底規則管
+    const STATE = /^\.streak\.pop \.n$|^\.opt\.(ok|no)$|^\.cell\.(ok|no)$/;
+    const FLOW_PROPS = new Set([
+      'width', 'height', 'min-width', 'min-height', 'max-width', 'max-height',
+      'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+      'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+      'font', 'font-size', 'font-weight', 'line-height', 'letter-spacing', 'word-spacing',
+      'border', 'border-width', 'border-style', 'border-top-width', 'border-right-width',
+      'border-bottom-width', 'border-left-width',
+      'display', 'position', 'top', 'right', 'bottom', 'left', 'inset',
+      'gap', 'flex', 'flex-basis', 'grid-template-columns', 'writing-mode', 'zoom',
+    ]);
+    const hit = rulesMatching(STATE);
+    assert.ok(hit.length >= 5, `狀態 selector 應全部存在，實得 ${hit.length} 條`);
+    for (const r of hit) {
+      const bad = propsOf(r.body).filter((p) => FLOW_PROPS.has(p));
+      assert.deepEqual(bad, [], `${r.sel} 動到會影響佔位的屬性：${bad.join('、')}`);
+    }
   });
 });
 
