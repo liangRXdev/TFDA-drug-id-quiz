@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import crypto from 'node:crypto';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { normalize, squash, editDistance, FUZZY_MIN_LEN } from '../engine.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -38,6 +38,50 @@ const die = (msg) => { throw new PipelineError(msg); };
 
 // ── 最小 ZIP 讀取器（不引入 npm 依賴）─────────────────────────────────
 
+/**
+ * ZIP 中央目錄的 DOS 日期欄位 → `YYYY-MM-DD`，不合法回 `null`。
+ *
+ * **這是來源端的資料產生時間，不是執行時間**——實測 TFDA 的 ZIP entry 標
+ * `2026-08-03`，而下載當下是 `2026-08-06`，相差 3 天，不可能是隨請求重編的。
+ * 來源沒有 `Last-Modified` 也沒有 `ETag`（實測皆無），這是唯一的穩定版本欄位。
+ * 因此可安全放進 `meta.source_version` 而不破壞 B7 冪等（規格 `plan.md:228`）。
+ *
+ * 只取日期：DOS 格式不帶時區，時分秒對使用者無意義；
+ * 同日重編有 `content_hash` 分辨得出來。
+ */
+export function dosDateToISO(dateWord) {
+  const y = ((dateWord >> 9) & 0x7f) + 1980;
+  const m = (dateWord >> 5) & 0x0f;
+  const d = dateWord & 0x1f;
+  if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+/**
+ * 規格 D10 的增量判定：沿用前版的 `src_sha256`。
+ *
+ * 〔SC-3〕原本對每一筆寫死 `null`，而 `fetch-images.py` 的 todo predicate 含
+ * `or not i.get("src_sha256")`——恆真，於是每次排程都全量重抓 3,913 張圖，
+ * `--verify-all` 與一般排程毫無差異，D10 宣告的增量判定形同未實作。
+ * 後果是把 TFDA 暫時性失敗的曝險放大到全量，而發布紀律是全有全無。
+ *
+ * **URL 變了就不沿用**——URL 是 TFDA 換圖時唯一看得見的訊號；
+ * 沿用舊雜湊會讓 fetch-images 直接跳過，新圖永遠抓不進來。
+ * 檔案是否真的在磁碟上由 fetch-images 的 predicate 另外把關，這裡不重複判斷。
+ */
+export function carryHashes(items, prevItems) {
+  const prev = new Map((prevItems ?? []).map((p) => [p.id, p]));
+  let carried = 0;
+  for (const it of items) {
+    const p = prev.get(it.id);
+    if (p && p.src === it.src && p.src_sha256) {
+      it.src_sha256 = p.src_sha256;
+      carried++;
+    }
+  }
+  return carried;
+}
+
 function readZipEntries(buf) {
   // End of Central Directory：簽章 0x06054b50，自尾端回掃（含 comment 情形）
   let eocd = -1;
@@ -53,6 +97,7 @@ function readZipEntries(buf) {
   for (let n = 0; n < count; n++) {
     if (buf.readUInt32LE(off) !== 0x02014b50) die(`ZIP 中央目錄第 ${n} 筆簽章錯誤`);
     const method = buf.readUInt16LE(off + 10);
+    const mtime = dosDateToISO(buf.readUInt16LE(off + 14));   // 來源資料產生日（SC-2）
     const compSize = buf.readUInt32LE(off + 20);
     const nameLen = buf.readUInt16LE(off + 28);
     const extraLen = buf.readUInt16LE(off + 30);
@@ -72,7 +117,7 @@ function readZipEntries(buf) {
     else if (method === 8) content = zlib.inflateRawSync(raw);
     else die(`ZIP 使用不支援的壓縮方式 ${method}：${name}`);
 
-    entries.push({ name, content });
+    entries.push({ name, content, mtime });
     off += 46 + nameLen + extraLen + cmtLen;
   }
   return entries;
@@ -101,7 +146,7 @@ function pickDataFile(entries) {
     try { parsed = JSON.parse(e.content.toString('utf8')); } catch { continue; }
     if (!Array.isArray(parsed) || parsed.length === 0) continue;
     const keys = Object.keys(parsed[0]);
-    if (REQUIRED_FIELDS.every((f) => keys.includes(f))) candidates.push({ name: e.name, rows: parsed });
+    if (REQUIRED_FIELDS.every((f) => keys.includes(f))) candidates.push({ name: e.name, rows: parsed, mtime: e.mtime });
   }
   if (candidates.length === 0) die('ZIP 內找不到符合 schema 的資料檔');
   if (candidates.length > 1) {
@@ -211,8 +256,8 @@ async function main() {
   const entries = readZipEntries(buf);
 
   console.log(`[3/8] ZIP 內 ${entries.length} 個檔案，依 schema 辨識資料檔`);
-  const { name, rows } = pickDataFile(entries);
-  console.log(`      → ${name}（${rows.length.toLocaleString()} 筆）`);
+  const { name, rows, mtime } = pickDataFile(entries);
+  console.log(`      → ${name}（${rows.length.toLocaleString()} 筆）　資料版本 ${mtime ?? '(ZIP 無合法日期)'}`);
 
   if (rows.length < MIN_SOURCE_ROWS) die(`來源僅 ${rows.length} 筆，低於下限 ${MIN_SOURCE_ROWS}，中止`);
   const missing = REQUIRED_FIELDS.filter((f) => !(f in rows[0]));
@@ -236,11 +281,15 @@ async function main() {
   }
   console.log(`      ${keys.size.toLocaleString()} / ${items.length.toLocaleString()} 唯一 ✓`);
 
-  console.log('[7/8] 比對變動幅度');
+  console.log('[7/8] 比對變動幅度，沿用未變動項目的來源雜湊');
   let prev = null;
   if (fs.existsSync(outPath)) {
     try { prev = JSON.parse(fs.readFileSync(outPath, 'utf8')); } catch { /* 損毀視同無前版 */ }
   }
+  // D10 增量判定（SC-3）：前版雜湊必須在寫出前沿用，否則 fetch-images 會全量重抓
+  const carried = carryHashes(items, prev?.items);
+  console.log(`      沿用來源雜湊 ${carried.toLocaleString()} / ${items.length.toLocaleString()}`
+    + `　→ 待抓 ${(items.length - carried).toLocaleString()}`);
   if (prev?.items) {
     const before = new Set(prev.items.map((i) => i.id));
     const after = new Set(items.map((i) => i.id));
@@ -263,6 +312,10 @@ async function main() {
       schema: 1,
       source: 'TFDA 藥品外觀資料集 (opendata 42)',
       source_file: name,
+      // 來源 ZIP 內含的資料產生日，非執行時間（SC-2，規格 plan.md:228）。
+      // ZIP 沒有合法日期時寧可不寫欄位——寫個假值比缺欄位更糟，
+      // 前端的 `if (m.source_version)` 本來就容許缺席
+      ...(mtime ? { source_version: mtime } : {}),
       source_rows: rows.length,
       content_hash: 'sha256:' + crypto.createHash('sha256').update(buf).digest('hex'),
       count: items.length,
@@ -278,8 +331,12 @@ async function main() {
   console.log(`      ${path.relative(ROOT, outPath)}  ${items.length.toLocaleString()} 題  ${kb} KB ✓`);
 }
 
-main().catch((e) => {
-  console.error(`\n✖ ${e instanceof PipelineError ? e.message : e.stack}`);
-  console.error('  data/ 未變更。');
-  process.exit(1);
-});
+// 直接執行才跑管線。沒有這道 guard 的話，測試一 import 就會真的去下載 TFDA 來源——
+// 純函式（dosDateToISO／carryHashes）因此完全測不到
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  main().catch((e) => {
+    console.error(`\n✖ ${e instanceof PipelineError ? e.message : e.stack}`);
+    console.error('  data/ 未變更。');
+    process.exit(1);
+  });
+}

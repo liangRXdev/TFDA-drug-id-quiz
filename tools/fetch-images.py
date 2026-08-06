@@ -13,6 +13,14 @@
 
 失敗紀律（規格 D9）：暫時性下載失敗**不得**用刪題吸收。
 重試 3 次仍失敗即整批中止，pool.json 不更新——已下載的檔案保留，可續跑。
+
+增量判定（規格 D10）：重抓條件為「新增 **或** URL 變更 **或** 檔案不存在」。
+前兩者由 build-pool.mjs 的 carryHashes() 決定——它只對 id 與 src URL 都未變的項目
+沿用前版 src_sha256，其餘留 null，於是在這裡自動落入 todo。
+每季一次 --verify-all 完整重抓並比對雜湊，偵測 TFDA 原地換圖。
+
+解碼驗證（規格 B5）：新寫出的每一張都做完整 Pillow 解碼；
+--verify-all 時對內容未變的既有檔案也解碼一次。
 """
 from __future__ import annotations
 
@@ -75,20 +83,36 @@ def to_webp(raw: bytes) -> bytes:
     return out.getvalue()
 
 
+def verify_asset(dest: Path) -> None:
+    """
+    對**落地後**的 WebP 做完整解碼，失敗即拋出（規格 B5）。
+
+    to_webp() 的 im.load() 驗的是**來源原圖**，證明不了寫出去的那份完好；
+    而 verify-data.mjs 只讀 RIFF 長度與第一個 chunk header，同樣證明不了。
+    這裡是「可解碼」這個宣稱唯一真正的證據來源。
+    """
+    with Image.open(dest) as im:
+        im.load()
+
+
 def process(item: dict, verify_all: bool) -> tuple[str, str | None, str | None]:
     """回傳 (id, src_sha256, error)。已存在且雜湊已知時跳過。"""
     dest = ROOT / "data" / item["img"]
-    if dest.exists() and item.get("src_sha256") and not verify_all:
-        return item["id"], item["src_sha256"], None
     try:
+        if dest.exists() and item.get("src_sha256") and not verify_all:
+            return item["id"], item["src_sha256"], None
         raw = download(item["src"])
         digest = hashlib.sha256(raw).hexdigest()
-        # 內容未變且檔案已在，不重寫（維持 git 冪等）
+        # 內容未變且檔案已在，不重寫（維持 git 冪等）。
+        # --verify-all 的季度全驗走這條——重下載證明不了磁碟上那份沒壞，要真的解碼
         if dest.exists() and item.get("src_sha256") == digest:
+            if verify_all:
+                verify_asset(dest)
             return item["id"], digest, None
         webp = to_webp(raw)
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(webp)
+        verify_asset(dest)          # 新抓的每一張都驗，成本只有一次解碼
         return item["id"], digest, None
     except Exception as e:  # noqa: BLE001
         return item["id"], None, str(e)
