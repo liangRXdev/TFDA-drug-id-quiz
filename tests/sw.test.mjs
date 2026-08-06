@@ -122,6 +122,31 @@ describe('SW 快取界線：題庫與圖片永不進快取', () => {
   });
 });
 
+describe('C31 每批交付無條件升 CACHE 版本', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'sw.js'), 'utf8');
+
+  test('CACHE 版本字串已升到本批的值', () => {
+    // 〔堵〕只改既有 shell 檔而不新增資源時，條件式斷言會直接跳過升版檢查。
+    //       這裡把版本釘死：改 shell 就必須同時改 sw.js 與這一行，
+    //       「這批沒新增資源所以不用升」的判斷不留給下一個人
+    const m = /const CACHE = '([^']+)'/.exec(src);
+    assert.ok(m, 'sw.js 必須有 const CACHE');
+    assert.equal(m[1], 'tfda-drug-id-quiz-v2', '本批（v4 批次 A）必須升到 v2');
+  });
+
+  test('shell 清單的每個資源都真的存在', async () => {
+    // 由實際的 install 事件驅動，不比對原始碼字串
+    const { listeners, store } = loadSw();
+    let done;
+    listeners.install({ waitUntil: (p) => { done = p; } });
+    await done;
+    for (const u of store.keys()) {
+      if (u === './') continue;
+      assert.ok(fs.existsSync(path.join(ROOT, u)), `shell 清單引用了不存在的檔案：${u}`);
+    }
+  });
+});
+
 describe('PWA 資產完整性', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.webmanifest'), 'utf8'));
 

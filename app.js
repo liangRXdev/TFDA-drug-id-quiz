@@ -14,10 +14,16 @@ import {
   buildIndex, eligibleKeys, drawLeveledQuiz, judgeChoice,
   pickEliminated, replaceOption, drawSpareQuestion, validateQuizInvariants,
   DECK_SIZE, buildLookAlikeIndex, lookAlikesOf, flipCard, drawDeck, drawSpareCard,
-  displayZh,
+  displayZh, longestStreak, currentStreak, rankTitle,
 } from './engine.js';
 
 const SCHEMA = 1;
+/**
+ * 最佳紀錄的 localStorage key。**前綴不可省**——
+ * 本站與 pharmacy-portal 的 17 個工具同源，localStorage 是整站共用的。
+ */
+const RECORDS_KEY = 'tfda-drug-id-quiz:records';
+const RECORDS_SCHEMA = 1;
 const MAX_VOID = 3;          // 規格 6.5：遞補失敗次數上限
 /**
  * 閃卡連續遞補上限。**與測驗的 MAX_VOID 意義不同**——測驗超過就中止回合，
@@ -69,6 +75,12 @@ const state = {
   nextToken: 1,              // 題目 token，遞補不重用（規格 D18）
   gridLoaded: new Set(),     // L2 已成功載入的格（ready-gate，規格 D21）
   timers: [],                // L2 各格的載入逾時，換題時必須全部清掉
+  /**
+   * 最近一次讀到的最佳紀錄。**只供渲染，寫入時一律重讀**——
+   * 這份快照可能已被另一個分頁的回合超越（D25）。
+   * `null` 代表 storage 不可用。
+   */
+  records: null,
 
   // 閃卡（獨立於測驗的狀態，不共用 questions／idx——共用會讓
   // 「閃完一疊再去測驗」把閃卡殘留的索引帶進成績頁）
@@ -145,10 +157,176 @@ async function loadPool() {
   if (m.source_version) $('srcVer').textContent = `，資料版本 ${m.source_version}`;
 
   renderLevelPicker();
+  renderRecords();
   show($('start'));
   $('qTotal').textContent = QUIZ_SIZE;
   $('introN').textContent = QUIZ_SIZE;
   $('fTotal').textContent = DECK_SIZE;
+}
+
+// ── 最佳紀錄（localStorage，規格 v4 D25）─────────────────────────────
+
+const RE_REC_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const RE_REC_POOL = /^[0-9a-f]{12}$/;
+/** 題庫未提供 content_hash 時的佔位值，顯示為「—」。不是任何真實 hash 的前綴 */
+const UNKNOWN_POOL = '000000000000';
+const REC_LABEL = { bestScore: '最高分', bestStreak: '最長連對' };
+
+/**
+ * 取得 localStorage，**取不到一律回 `null` 而不拋**。
+ *
+ * E1（不存在／被停用）與 E2（存取拋例外）的差別只在原因，行為完全相同。
+ * 連屬性存取本身都包在 try 內：第三方 cookie 被封鎖的 iframe 中，
+ * 讀 `localStorage` 這個 property 就會丟 SecurityError，還沒呼叫到任何方法。
+ * 也刻意不只捕捉具名例外類別——瀏覽器實作丟什麼不是我們能假設的。
+ */
+function storage() {
+  try {
+    const ls = globalThis.localStorage;
+    if (!ls || typeof ls.getItem !== 'function') return null;
+    return ls;
+  } catch { return null; }
+}
+
+/** 本回合題庫的識別碼：`content_hash` 前 12 碼。只做診斷顯示，不參與比較（D25） */
+function poolHash() {
+  const h = String(state.pool?.meta?.content_hash || '')
+    .replace(/^sha256:/, '').toLowerCase().slice(0, 12);
+  return RE_REC_POOL.test(h) ? h : UNKNOWN_POOL;
+}
+
+/** 本機日期。**不可用 `toISOString()`**——那是 UTC，台灣凌晨的紀錄會被標成前一天 */
+function today() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function validEntry(e, { max, int = false }) {
+  if (!e || typeof e !== 'object') return null;
+  const v = e.value;
+  if (typeof v !== 'number' || !Number.isFinite(v)) return null;
+  if (int && !Number.isInteger(v)) return null;
+  if (v < 0 || v > max) return null;
+  if (typeof e.date !== 'string' || !RE_REC_DATE.test(e.date)) return null;
+  if (typeof e.pool !== 'string' || !RE_REC_POOL.test(e.pool)) return null;
+  return { value: v, date: e.date, pool: e.pool };
+}
+
+/**
+ * E6：單一難度的完整性判定。**兩項都合法才採信。**
+ *
+ * 第一個完成的回合必定同時寫入兩項（無紀錄時任何有限值都算破紀錄），
+ * 因此「只有一項」本身就代表資料被動過；部分採信會讓半壞的紀錄留在畫面上。
+ * `bestStreak` 的上界是 `QUIZ_SIZE`：凡走到 `finish()` 的回合分母恆為 20（F9）。
+ */
+function validRecord(r) {
+  if (!r || typeof r !== 'object') return null;
+  const bestScore = validEntry(r.bestScore, { max: 100 });
+  const bestStreak = validEntry(r.bestStreak, { max: QUIZ_SIZE, int: true });
+  return bestScore && bestStreak ? { bestScore, bestStreak } : null;
+}
+
+/**
+ * 讀取紀錄。**任何失效情境都不得執行 storage mutation**——
+ * 讀到壞資料就順手清掉，等於把「未來版本寫的資料」在舊版本開啟時靜默刪除（E4／E5）。
+ *
+ * @returns {object|null} `null` = storage 不可用（E1／E2，整塊隱藏）；
+ *   物件 = 可用，內含通過 predicate 的難度（可能是空物件）
+ */
+function readRecords() {
+  const ls = storage();
+  if (!ls) return null;
+  let raw;
+  try { raw = ls.getItem(RECORDS_KEY); } catch { return null; }
+  if (raw == null) return {};
+  let obj;
+  try { obj = JSON.parse(raw); } catch { return {}; }                 // E4
+  if (!obj || typeof obj !== 'object' || obj.schema !== RECORDS_SCHEMA) return {};  // E5：不遷移
+  const out = {};
+  for (const lv of LEVEL_ORDER) {
+    const rec = validRecord(obj[lv]);
+    if (rec) out[lv] = rec;                                           // E6：只丟該難度
+  }
+  return out;
+}
+
+/**
+ * 寫入紀錄。**寫入前重讀最新值再逐項取 max。**
+ *
+ * 這**不消除競態**——localStorage 沒有跨分頁交易，單一 key 也給不了原子性。
+ * 它只把後果從「另一個分頁剛創的紀錄被本頁的舊快照倒退覆蓋」降為
+ * 「極短窗口內漏記一次」。刻意不引入 `storage` 事件／`BroadcastChannel`／鎖：
+ * 那是為了一個沒有人會遇到的窗口新增一整類跨分頁狀態。
+ *
+ * 只有**嚴格大於**才更新。相等時連 `date` 都不動——相等就刷新日期，
+ * 「最佳紀錄的日期」會變成「最近一次打平的日期」，不是使用者預期的語意。
+ *
+ * @returns {{records: object, fresh: string[]}|null}
+ *   `null` = 無 storage 或寫入失敗（E3）。呼叫端據此**不顯示「新紀錄！」**——
+ *   宣稱已保存而實際失敗，使用者要到下次開啟才會發現紀錄不見了。
+ */
+function writeRecords(level, score, streak) {
+  const ls = storage();
+  if (!ls) return null;
+  // 讀不到就**不寫**（E2）。讀取失敗不代表沒有紀錄——照寫等於用一筆看不見的
+  // 舊快照覆蓋掉一筆可能更好的紀錄，而使用者到下次開啟才會發現最佳成績退步了
+  const cur = readRecords();
+  if (!cur) return null;
+  const prev = cur[level] || {};
+  const stamp = { date: today(), pool: poolHash() };
+  const fresh = [];
+  const merged = { ...prev };
+  if (!prev.bestScore || score > prev.bestScore.value) {
+    merged.bestScore = { value: score, ...stamp };
+    fresh.push('bestScore');
+  }
+  if (!prev.bestStreak || streak > prev.bestStreak.value) {
+    merged.bestStreak = { value: streak, ...stamp };
+    fresh.push('bestStreak');
+  }
+  if (!fresh.length) return { records: cur, fresh: [] };   // 沒破紀錄 → 零 storage mutation
+  const next = { schema: RECORDS_SCHEMA };
+  for (const lv of LEVEL_ORDER) if (cur[lv]) next[lv] = cur[lv];
+  next[level] = merged;
+  try { ls.setItem(RECORDS_KEY, JSON.stringify(next)); } catch { return null; }   // E3
+  return { records: { ...cur, [level]: merged }, fresh };
+}
+
+/** E7：只移除**精確的**那一個 key。前綴掃描今日無害，新增 `:settings` 那天就會誤刪 */
+function clearRecords() {
+  const ls = storage();
+  if (!ls) return false;
+  try { ls.removeItem(RECORDS_KEY); } catch { return false; }
+  return true;
+}
+
+const recLine = (k, v, e) => `
+  <div class="rec-line"><span class="k">${k}</span><span class="v">${v}</span>
+    <span class="d">${escapeHtml(e.date)}</span>
+    <span class="p">題庫 ${e.pool === UNKNOWN_POOL ? '—' : escapeHtml(e.pool)}</span></div>`;
+
+/**
+ * 起始頁的紀錄區塊。
+ *
+ * 一筆紀錄都沒有時整塊隱藏：擺一排「—」只是噪音，
+ * 而「清除紀錄」在沒有東西可清的時候本來就不該出現。
+ */
+function renderRecords() {
+  const recs = readRecords();
+  state.records = recs;
+  const levels = recs ? LEVEL_ORDER.filter((lv) => recs[lv]) : [];
+  show($('recordsBox'), levels.length > 0);
+  show($('clearConfirm'), false);
+  show($('recordsNote'), false);
+  $('recordsBody').innerHTML = levels.map((lv) => {
+    const r = recs[lv];
+    return `<div class="rec">
+      <div class="rec-lv"><span class="badge">${LEVELS[lv].badge}</span></div>
+      ${recLine('最高分', r.bestScore.value.toFixed(1), r.bestScore)}
+      ${recLine('最長連對', `${r.bestStreak.value} 題`, r.bestStreak)}
+    </div>`;
+  }).join('');
 }
 
 // ── 難度選擇（規格 §6.1）─────────────────────────────────────────────
@@ -267,6 +445,23 @@ const featureCell = (name, val, interp) => `
 
 const OPT_KEYS = ['A', 'B', 'C', 'D'];
 
+/**
+ * 答題頁 header 的連對顯示（規格 v4 D32）。
+ *
+ * 一律由 `currentStreak` 現算，不維護增量計數——遞補會改變陣列組成（D23 同一理由）。
+ * `upTo` 是 exclusive：作答鎖定後要傳 `state.idx + 1` 才會把當題算進去。
+ *
+ * `pop` 只加一個 class，放大交給 CSS 的 transform transition。
+ * 收尾靠下一題的 render 移除 class，**不用任何 timer**——
+ * 用 `setTimeout` 收尾的動畫會多一條與資訊呈現無關的排程（D27 條 2 的精神）。
+ */
+function refreshStreak(upTo, pop = false) {
+  const n = currentStreak(state.questions, upTo);
+  $('qStreakN').textContent = n;
+  show($('qStreak'), n >= 1);            // 0 沒有「連對」可言，顯示「連對 0」只是噪音
+  $('qStreak').classList.toggle('pop', !!pop && n >= 1);
+}
+
 function renderQuestion() {
   const q = state.questions[state.idx];
   const cfg = LEVELS[q.level ?? Level.L3];
@@ -275,6 +470,7 @@ function renderQuestion() {
   $('qIdx').textContent = state.idx + 1;
   $('qBar').style.width = `${(state.idx / QUIZ_SIZE) * 100}%`;
   $('qScore').textContent = scoreQuiz(state.questions.slice(0, state.idx)).earned.toFixed(1);
+  refreshStreak(state.idx);
 
   show($('qHint'), false);
   show($('qVerdict'), false);
@@ -509,6 +705,7 @@ function voidCurrent(reason) {
   clearTimers();
   state.questions[state.idx] = next;
   state.voided++;
+  refreshStreak(state.idx + 1);            // 作廢跳過，因此顯示值必然與作廢前相同
 
   if (state.voided > MAX_VOID) {
     return fatal(`已有 ${state.voided} 題因資源載入失敗而作廢，中止本回合以免影響成績判讀。<br>原因：${reason}`);
@@ -559,7 +756,13 @@ function lockAndReveal(locked, correct, extraNote = '') {
       <span class="lic">${escapeHtml(q.item.id)}</span></div>`;
   show(v);
 
+  // 連對在同一 tick 更新。VOID 的「顯示值不變」由 currentStreak 的跳過語意自動成立
+  refreshStreak(state.idx + 1, correct);
+
   show($('btnNext'));
+  // 明確寫上 disabled=false：D27 條 2 要求揭曉後**同一 tick 即可操作**，
+  // 「看得到但按不下去」與延後呈現是同一種失效
+  $('btnNext').disabled = false;
   $('btnNext').textContent = state.idx + 1 >= state.questions.length ? '看成績' : '下一題';
   $('btnNext').focus();
 }
@@ -867,6 +1070,7 @@ function quitFlash() {
 
 function finish() {
   const r = scoreQuiz(state.questions);
+  const streak = longestStreak(state.questions);
   const cfg = LEVELS[state.quizLevel ?? Level.L3];
   show($('quiz'), false);
   show($('result'));
@@ -895,7 +1099,15 @@ function finish() {
     <div class="metric"><div class="name">實得分數</div><div class="val">${r.earned.toFixed(1)}</div>
       <div class="interp muted">滿分 ${r.counted}.0</div></div>
     <div class="metric"><div class="name">使用提示</div><div class="val">${r.hints}</div>
-      <div class="interp ${r.hints ? 'muted' : 'good'}">${r.hints ? '該題滿分降為 0.5' : '未使用'}</div></div>`;
+      <div class="interp ${r.hints ? 'muted' : 'good'}">${r.hints ? '該題滿分降為 0.5' : '未使用'}</div></div>
+    <div class="metric"><div class="name">最長連對</div><div class="val">${streak.length} 題</div>
+      ${streak.hinted ? `<div class="interp muted">含 ${streak.hinted} 題提示</div>` : ''}</div>`;
+
+  // 稱號。由**實際的** quizLevel 與 score 查表，並與級別徽章同框（D24）
+  const title = rankTitle(state.quizLevel, r.score);
+  $('rankBadge').textContent = cfg.badge;
+  $('rankTitle').textContent = title;
+  show($('resultRank'), !!title);
 
   const isChoice = cfg.choice;
   $('reviewHead').innerHTML = isChoice
@@ -916,6 +1128,21 @@ function finish() {
       + `<td>${got}${q.mark === HINTED_MARK ? '（提示）' : ''}</td>`
       + `<td class="mk">${q.correct ? q.mark.toFixed(1) : '0.0'}</td></tr>`;
   }).join('');
+
+  // 紀錄寫入放在**全部渲染之後**，並整段包在 try 內：
+  // 持久化是附加功能，它的任何失敗都不得讓使用者拿不到分數與逐題檢討（§5.2）
+  let fresh = [];
+  try {
+    fresh = writeRecords(state.quizLevel, r.score, streak.length)?.fresh ?? [];
+  } catch (e) {
+    console.warn('[records] 寫入失敗', e);
+  }
+  // 「新紀錄！」只在持久化確認完成後顯示——宣稱已保存而實際失敗，
+  // 使用者要到下次開啟才會發現紀錄不見了（E3）
+  $('recordFlash').textContent = fresh.length
+    ? `新紀錄！${fresh.map((k) => REC_LABEL[k]).join('、')}`
+    : '';
+  show($('recordFlash'), fresh.length > 0);
 
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -1061,6 +1288,7 @@ function backToStart() {
   show($('flashDone'), false);
   show($('start'));
   resetLevel();                 // 每回合都必須重新選級別（規格 §6.1）
+  renderRecords();              // 剛結束的回合可能剛破紀錄，回起始頁要看得到
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
@@ -1091,5 +1319,17 @@ $('btnFlashStop').addEventListener('click', () => {
 });
 $('btnToQuiz').addEventListener('click', backToStart);
 $('btnFlashAgain').addEventListener('click', startFlash);
+
+// 清除紀錄：二次確認走頁內元素而不是 window.confirm——
+// 瀏覽器 modal 會阻斷整個頁面，而且取消路徑無從自動驗證（E7 要求取消時零 mutation）
+$('btnClearRecords').addEventListener('click', () => show($('clearConfirm')));
+$('btnClearNo').addEventListener('click', () => show($('clearConfirm'), false));
+$('btnClearYes').addEventListener('click', () => {
+  const ok = clearRecords();
+  renderRecords();              // 內含隱藏確認框與提示；順序在下方設定文字之前
+  // 移除失敗時不得顯示「已清除」：紀錄其實還在，下次開啟又會冒出來
+  $('recordsNote').textContent = ok ? '已清除最佳紀錄。' : '清除失敗，紀錄仍在。';
+  show($('recordsNote'));
+});
 
 loadPool();
