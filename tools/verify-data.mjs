@@ -11,6 +11,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+// 〔CR-3〕與 build-pool 共用同一條格式規則。各寫一份必然漂移，
+// 而漂移的後果是「產生端認為合法、驗證端放行」的值悄悄留在 pool 裡
+import { isSha256 } from './build-pool.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const POOL = path.join(ROOT, 'data/pool.json');
@@ -125,7 +128,8 @@ function main() {
       bad++;
       if (bad <= 5) fail('B5', `${it.img} 容器結構不合法：${e.message}`);
     }
-    if (!it.src_sha256) noHash.push(it.id);
+    // 〔CR-3〕不只判斷有值：格式不合法的雜湊同樣證明不了來源對應
+    if (!isSha256(it.src_sha256)) noHash.push(it.id);
   }
   if (missing) fail('B5', `${missing} 筆資產不存在（請執行 npm run fetch:images）`);
   else ok(`全部 ${items.length.toLocaleString()} 張資產存在`);
@@ -134,8 +138,9 @@ function main() {
   if (!bad && !missing) ok('全部資產的 WebP 容器結構合法（未解壓位元流，解碼由 fetch-images 驗）');
   if (!oversize && !missing) ok(`全部資產長邊 ≤${MAX_EDGE}px`);
 
-  if (noHash.length) fail('B6', `${noHash.length} 筆缺 src_sha256（無法證明來源對應）：${noHash.slice(0, 3).join(', ')}…`);
-  else if (!missing) ok('全部項目具來源雜湊');
+  if (noHash.length) fail('B6', `${noHash.length} 筆的 src_sha256 缺漏或非 64 碼小寫十六進位`
+    + `（無法證明來源對應）：${noHash.slice(0, 3).join(', ')}…`);
+  else if (!missing) ok('全部項目具格式合法的來源雜湊');
 
   // ── B9：孤兒資產與容量預算 ────────────────────────────────────────
   if (fs.existsSync(IMG_DIR)) {

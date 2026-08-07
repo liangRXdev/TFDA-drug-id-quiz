@@ -54,8 +54,26 @@ export function dosDateToISO(dateWord) {
   const m = (dateWord >> 5) & 0x0f;
   const d = dateWord & 0x1f;
   if (m < 1 || m > 12 || d < 1 || d > 31) return null;
-  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  // 〔CR-2〕range check 擋得掉 m>12／d>31，卻放行曆法上不存在的日：
+  // 2026-02-31、2026-04-31、非閏年的 2025-02-29 都會輸出「看起來合法」的字串。
+  // 這直接違反本檔下方自己寫的紀律——**寫假值比缺欄位更糟**。
+  // round-trip 才是真的驗：Date.UTC 會把不存在的日進位到下個月
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) return null;
+  return dt.toISOString().slice(0, 10);
 }
+
+/**
+ * 〔CR-3〕`src_sha256` 的格式判定。**三處共用同一條規則**
+ * （這裡、`fetch-images.py` 的 `is_sha256()`、`verify-data.mjs`）。
+ *
+ * 原本三處都只判斷 truthy，於是損毀或格式漂移的值（截斷、大寫、字串 `"undefined"`）
+ * 一律被當成「已完成」：carryHashes 沿用它 → fetch-images 的 todo 不收它 →
+ * verify-data 也放行。結果是這一筆可以**永久**避開一般排程，
+ * 只有每季一次的 `--verify-all` 才碰得到。
+ * 沒驗格式的欄位只證明「有東西」，不證明「是雜湊」。
+ */
+export const isSha256 = (v) => typeof v === 'string' && /^[0-9a-f]{64}$/.test(v);
 
 /**
  * 規格 D10 的增量判定：沿用前版的 `src_sha256`。
@@ -74,7 +92,8 @@ export function carryHashes(items, prevItems) {
   let carried = 0;
   for (const it of items) {
     const p = prev.get(it.id);
-    if (p && p.src === it.src && p.src_sha256) {
+    // 〔CR-3〕格式不合法的舊雜湊不沿用——沿用等於讓損毀的那一筆永久避開重抓
+    if (p && p.src === it.src && isSha256(p.src_sha256)) {
       it.src_sha256 = p.src_sha256;
       carried++;
     }
@@ -248,7 +267,8 @@ function computeNoFuzzy(items) {
 async function main() {
   const argv = process.argv.slice(2);
   const arg = (k) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : null; };
-  const outPath = path.join(ROOT, arg('--out') || 'data/pool.json');
+  // resolve 而非 join：相對路徑照樣以 ROOT 為基準，絕對路徑（測試的暫存輸出）才不會被接成廢字串
+  const outPath = path.resolve(ROOT, arg('--out') || 'data/pool.json');
   const allowAnyDelta = argv.includes('--allow-any-delta');
 
   const buf = await fetchSource(arg('--source'));
