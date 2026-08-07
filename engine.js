@@ -784,6 +784,99 @@ export function drawSpareQuestion({ index, level, eligible, questions, token, rn
   return null;
 }
 
+// ── M5 錯題再戰（規格 D28）───────────────────────────────────────────
+
+/**
+ * 本回合的錯題答案鍵（規格 D28）。順序沿用原卷。
+ *
+ * **判準是正向白名單 `state === LOCKED`，不是 `state !== VOID`。**
+ * 規格 D28 原文寫「`state !== QState.VOID` 且 `correct === false`」，
+ * 那是錯的——`newQuestion()` 把 `correct` 預設為 `false`，而 `transition()`
+ * 只在 submit／fail 時才寫它，於是**未作答（PENDING）與已提示未答（HINTED）
+ * 的題目 `correct` 也都是 `false`**，會被一併收進錯題集合。
+ *
+ * 今天碰不到，只因為 `finish()` 僅在所有題目都終態時才走得到——
+ * 那是脈絡的偶然，不是判準的正確性。呼叫端只要在中途叫它就會出錯，
+ * 而畫面上看不出來（使用者會拿到一份混入未作答題的「錯題」卷）。
+ * 規格已於 v4.6 同步修正。
+ *
+ * 作廢題不算錯題（沿用 D23 同一理由）；用提示答錯的題**算**錯題。
+ * 由原卷的 H1 保證回傳值兩兩相異——這裡不另外去重，
+ * 去重會把「原卷違反 H1」這個 bug 靜默吸收掉。
+ */
+export function wrongAnsKeys(questions) {
+  return (questions ?? [])
+    .filter((q) => q.state === QState.LOCKED && q.correct === false)
+    .map((q) => q.item.ans);
+}
+
+/**
+ * 錯題卷組裝（規格 D28 兩階段 + D28.1 原子發布點）。
+ *
+ * **與 `drawLeveledQuiz` 唯一的差別在階段 1**：整卷正解集合由 `ansKeys`
+ * **固定**而非隨機抽出。階段 2、3 完全共用同一條路徑——
+ * v3 花了兩輪覆審才把第一套組裝模型弄對，不再開第二套。
+ *
+ * 分級重建（依 F8：82.1% 的鍵只有 1 筆紀錄）：
+ * 三級一律**同答案鍵、重抽紀錄**（`pick` 在該鍵的紀錄內均勻）——
+ * 只有 1 筆時 `pick` 必然回傳那一筆，於是「沿用原圖」是自然結果而非特例分支。
+ * 選擇題另由 `buildChoices` 重抽誘答並洗牌，正解格位置因此**可變**
+ * （D28 已裁示這是可達性，不保證必異於原卷）。
+ *
+ * @param {string[]} ansKeys 錯題答案鍵，順序即出題順序
+ * @throws {Error} code = 'EMPTY_RETRY' | 'KEY_NOT_ELIGIBLE' | 'NO_DISTRACTORS'
+ *                      | 'QUIZ_ASSEMBLY_FAILED' | 'INVARIANT_VIOLATED'
+ */
+export function drawRetryQuiz(items, { level, ansKeys, rng = Math.random, index, eligible: pre } = {}) {
+  const keys = ansKeys ?? [];
+  if (!keys.length) {
+    const err = new Error('錯題集合為空，不建立複習卷');
+    err.code = 'EMPTY_RETRY';
+    throw err;
+  }
+  const idx = index || buildIndex(items);
+  const eligible = pre || eligibleKeys(idx, level);
+
+  // 指定鍵不在該級的 eligible 內 → 立刻失敗。
+  // 不「跳過該題繼續」：靜默剔除會讓使用者以為已複習完全部錯題（D28）
+  const bad = keys.filter((k) => !eligible.has(k) || !idx.byAns.has(k));
+  if (bad.length) {
+    const err = new Error(`答案鍵不在 ${level} 的可用集合內：${bad.join('、')}`);
+    err.code = 'KEY_NOT_ELIGIBLE';
+    err.keys = bad;
+    throw err;
+  }
+
+  // 【階段 1】整卷正解集合＝K，固定不抽。這是與 D19 唯一的差別
+  const excludeAns = new Set(keys);
+  const baseChance = level === Level.L3 ? CHANCE.NONE : CHANCE.FOUR;
+
+  let last;
+  for (let attempt = 0; attempt < MAX_QUIZ_ATTEMPTS; attempt++) {
+    try {
+      // 【階段 2】逐題組裝，excludeAns 恆為整卷正解集合（H2）
+      const quiz = keys.map((ans, i) => {
+        const it = pick(idx.byAns.get(ans), rng);      // 紀錄重抽；只有 1 筆時即沿用
+        return newQuestion(it, {
+          token: i + 1,
+          level,
+          chance: baseChance,
+          ...(level === Level.L3 ? {} : buildChoices(it, idx, { level, rng, excludeAns })),
+        });
+      });
+      // 【階段 3】整卷驗證，與正常卷同一個 validator
+      assertQuizInvariants(quiz, level, idx);
+      return quiz;
+    } catch (e) {
+      if (e.code !== 'NO_DISTRACTORS') throw e;        // 含 INVARIANT_VIOLATED：重抽只會掩蓋 bug
+      last = e;
+    }
+  }
+  const err = new Error(`複習卷組裝連續 ${MAX_QUIZ_ATTEMPTS} 次失敗：${last?.message ?? ''}`);
+  err.code = 'QUIZ_ASSEMBLY_FAILED';
+  throw err;
+}
+
 /**
  * D16：挑一個要排除的誘答格。
  *
