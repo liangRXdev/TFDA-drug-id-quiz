@@ -15,9 +15,13 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
+import { execFileSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { ROOT } from './_ui-harness.mjs';
-import { dosDateToISO, carryHashes } from '../tools/build-pool.mjs';
+import { dosDateToISO, carryHashes, isSha256 } from '../tools/build-pool.mjs';
 
 // ══ SC-2 來源版本 ═════════════════════════════════════════════════════
 
@@ -50,6 +54,23 @@ describe('SC-2 dosDateToISO：來源 ZIP 的資料產生日', () => {
     assert.equal(dosDateToISO(word(2026, 0, 15)), null, '月 = 0');
     assert.equal(dosDateToISO(word(2026, 13, 1)), null, '月 = 13');
     assert.equal(dosDateToISO(word(2026, 8, 0)), null, '日 = 0');
+  });
+
+  test('〔CR-2〕曆法上不存在的日回 null，不得只做 range check', () => {
+    // 〔堵〕`m<=12 && d<=31` 放行 2026-02-31、2026-04-31、非閏年的 2-29，
+    //       三者都會輸出「看起來合法」的 YYYY-MM-DD。
+    //       build-pool 自己的註解寫著「寫假值比缺欄位更糟」——只驗範圍就是在寫假值
+    assert.equal(dosDateToISO(word(2026, 2, 31)), null, '2 月沒有 31 日');
+    assert.equal(dosDateToISO(word(2026, 4, 31)), null, '4 月沒有 31 日');
+    assert.equal(dosDateToISO(word(2025, 2, 29)), null, '2025 非閏年，沒有 2-29');
+    assert.equal(dosDateToISO(word(2026, 6, 31)), null, '6 月沒有 31 日');
+  });
+
+  test('〔CR-2〕合法的閏日與月底仍須通過，不得矯枉過正', () => {
+    assert.equal(dosDateToISO(word(2024, 2, 29)), '2024-02-29', '2024 是閏年');
+    assert.equal(dosDateToISO(word(2000, 2, 29)), '2000-02-29', '整百閏年規則');
+    assert.equal(dosDateToISO(word(2026, 1, 31)), '2026-01-31');
+    assert.equal(dosDateToISO(word(2026, 4, 30)), '2026-04-30');
   });
 });
 
@@ -111,6 +132,50 @@ describe('SC-3 carryHashes：D10 的增量判定', () => {
     assert.equal(n, 1, `3,913 筆全部重抓正是 SC-3 的病徵，待抓數必須真的收斂`);
     assert.deepEqual(items.map((i) => i.src_sha256), [H1, null, null]);
   });
+
+  test('〔CR-3〕格式不合法的舊雜湊不得沿用', () => {
+    // 〔堵〕只判斷 truthy 的話，損毀的值會被原封不動沿用，
+    //       fetch-images 的 todo predicate 也放行 → 這一筆**永久**避開一般排程
+    for (const bad of ['corrupt', H1.slice(0, 63), H1.toUpperCase(), 'undefined', H1 + 'a', 0, {}]) {
+      const items = [item('A', 'http://x/1.jpg')];
+      const n = carryHashes(items, [{ id: 'A', src: 'http://x/1.jpg', src_sha256: bad }]);
+      assert.equal(n, 0, `不合法雜湊 ${JSON.stringify(bad)} 被沿用了`);
+      assert.equal(items[0].src_sha256, null, `不合法雜湊 ${JSON.stringify(bad)} 進了產物`);
+    }
+  });
+});
+
+describe('CR-3 isSha256：三處共用的格式判定', () => {
+  test('只接受 64 碼小寫十六進位', () => {
+    assert.equal(isSha256('a'.repeat(64)), true);
+    assert.equal(isSha256('0123456789abcdef'.repeat(4)), true);
+  });
+
+  test('長度、大小寫、型別、空白一律不接受', () => {
+    for (const bad of [
+      'A'.repeat(64),               // 大寫：Python 端產生的一律小寫，大寫代表另一個來源
+      'a'.repeat(63), 'a'.repeat(65),
+      ' ' + 'a'.repeat(64), 'a'.repeat(64) + '\n',
+      'g'.repeat(64),               // 非十六進位
+      '', null, undefined, 0, 123, {}, ['a'.repeat(64)],
+    ]) {
+      assert.equal(isSha256(bad), false, `${JSON.stringify(bad)} 不該被視為合法雜湊`);
+    }
+  });
+
+  test('Python 端 is_sha256 用同一條 regex（跨語言一致性）', () => {
+    // 〔堵〕兩邊各寫一份必然漂移，而漂移的後果是
+    //       「Node 端認為要重抓、Python 端認為已完成」這種永遠對不起來的狀態
+    const py = fs.readFileSync(path.join(ROOT, 'tools/fetch-images.py'), 'utf8');
+    assert.match(py, /_SHA256_RE\s*=\s*re\.compile\(r"\^\[0-9a-f\]\{64\}\$"\)/,
+      'fetch-images.py 的格式規則與 build-pool 的 isSha256 不一致');
+    assert.match(py, /def is_sha256\(/, 'fetch-images.py 缺少 is_sha256()');
+    // todo predicate 與 process() 的早退條件都必須走這條規則，不得只判斷有值
+    assert.doesNotMatch(py, /or not i\.get\("src_sha256"\)\]/,
+      'todo predicate 仍在只判斷 truthy');
+    assert.doesNotMatch(py, /dest\.exists\(\) and item\.get\("src_sha256"\) and/,
+      'process() 的早退仍在只判斷 truthy');
+  });
 });
 
 // ══ CR-2 解碼驗證的責任歸屬（靜態契約）═══════════════════════════════
@@ -153,14 +218,205 @@ describe('CR-2 「可解碼」的宣稱必須有對應的證據', () => {
   });
 });
 
+// ══ TG-1 產物端到端：欄位真的進到 pool.json ══════════════════════════
+
+/**
+ * 手組最小 ZIP（stored，method 0）。不引入 npm 依賴，理由與 build-pool
+ * 自己寫最小 ZIP 讀取器相同。
+ *
+ * 〔TG-1〕上面每一條都只測純函式——`pickDataFile()` 漏回傳 `mtime`、
+ * payload 漏寫 `source_version`，兩種錯誤實作都能讓它們全綠。
+ * **修一個「功能靜默不存在」的缺口時，最該補的測試就是「它現在真的存在」。**
+ */
+function makeZip(files) {
+  const locals = [];
+  const centrals = [];
+  let offset = 0;
+  for (const { name, content, dateWord } of files) {
+    const nameBuf = Buffer.from(name, 'utf8');
+    const crc = zlib.crc32(content);
+
+    const lh = Buffer.alloc(30);
+    lh.writeUInt32LE(0x04034b50, 0);      // 本地檔頭簽章
+    lh.writeUInt16LE(20, 4);              // version needed
+    lh.writeUInt16LE(0, 8);               // method 0 = stored
+    lh.writeUInt16LE(dateWord, 12);
+    lh.writeUInt32LE(crc, 14);
+    lh.writeUInt32LE(content.length, 18);
+    lh.writeUInt32LE(content.length, 22);
+    lh.writeUInt16LE(nameBuf.length, 26);
+    locals.push(lh, nameBuf, content);
+
+    const cd = Buffer.alloc(46);
+    cd.writeUInt32LE(0x02014b50, 0);      // 中央目錄簽章
+    cd.writeUInt16LE(20, 4);
+    cd.writeUInt16LE(20, 6);
+    cd.writeUInt16LE(0, 10);              // method
+    cd.writeUInt16LE(dateWord, 14);       // ← build-pool 讀的就是這個欄位
+    cd.writeUInt32LE(crc, 16);
+    cd.writeUInt32LE(content.length, 20);
+    cd.writeUInt32LE(content.length, 24);
+    cd.writeUInt16LE(nameBuf.length, 28);
+    cd.writeUInt32LE(offset, 42);         // 本地檔頭位移
+    centrals.push(cd, nameBuf);
+
+    offset += 30 + nameBuf.length + content.length;
+  }
+  const localPart = Buffer.concat(locals);
+  const cdPart = Buffer.concat(centrals);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(files.length, 8);
+  eocd.writeUInt16LE(files.length, 10);
+  eocd.writeUInt32LE(cdPart.length, 12);
+  eocd.writeUInt32LE(localPart.length, 16);
+  return Buffer.concat([localPart, cdPart, eocd]);
+}
+
+/** DOS 日期字：(年-1980)<<9 | 月<<5 | 日 */
+const dosWord = (y, m, d) => (((y - 1980) & 0x7f) << 9) | ((m & 0xf) << 5) | (d & 0x1f);
+
+/**
+ * 產生一份能通過 build-pool 全部驗收的來源列。
+ *
+ * 絕大多數列刻意在 Q1（固體口服）就被濾掉：`source_rows` 要過 5,000 筆下限，
+ * 而入選題數必須維持在個位數——`computeNoFuzzy()` 對同長度答案鍵是 O(n²)，
+ * 餵 5,000 題會讓這條測試從毫秒級變成分鐘級。
+ */
+function sourceRows({ keep = 6, filler = 5200 } = {}) {
+  const rows = [];
+  for (let i = 0; i < filler; i++) {
+    rows.push({
+      許可證字號: `衛部藥輸字第F${String(i).padStart(5, '0')}號`,
+      英文品名: `FILLER INJECTION ${i}`,
+      外觀圖檔連結: `https://example.invalid/f${i}.jpg`,
+      形狀: '注射劑',                  // ← Q1 濾掉
+      顏色: '無色', 刻痕: '無', 標註一: `F${i}`,
+    });
+  }
+  const NAMES = ['ALFATIN', 'BRAVOZOL', 'CHARLIDINE', 'DELTAMOX', 'ECHOPRIL', 'FOXTROLOL'];
+  for (let i = 0; i < keep; i++) {
+    rows.push({
+      許可證字號: `衛部藥製字第K${String(i).padStart(5, '0')}號`,
+      英文品名: `${NAMES[i % NAMES.length]} TABLETS ${i} MG`,
+      中文品名: `測試錠 ${i}`,
+      外觀圖檔連結: `https://example.invalid/k${i}.jpg`,
+      形狀: '圓形', 顏色: '白色', 刻痕: '無',
+      標註一: `KEEP${i}`, 標註二: '', 外觀尺寸: `${8 + i}mm`,
+    });
+  }
+  return rows;
+}
+
+/** 實跑 build-pool.mjs 到暫存輸出，回傳 stdout 與產物 */
+function runBuildPool(zip) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'idquiz-pool-'));
+  try {
+    const zipPath = path.join(dir, 'source.zip');
+    const outPath = path.join(dir, 'pool.json');
+    fs.writeFileSync(zipPath, zip);
+    const stdout = execFileSync(process.execPath,
+      ['tools/build-pool.mjs', '--source', zipPath, '--out', outPath],
+      { cwd: ROOT, encoding: 'utf8' });
+    return { stdout, pool: JSON.parse(fs.readFileSync(outPath, 'utf8')) };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+describe('TG-1 source_version 真的寫進產物（端到端）', () => {
+  const dataFile = (rows) => Buffer.from(JSON.stringify(rows), 'utf8');
+  /** 不符 schema 的誘餌，且日期刻意不同——用來證明取的是**資料檔**的日期 */
+  const decoy = {
+    name: 'readme.json',
+    content: Buffer.from(JSON.stringify([{ 說明: '這不是資料檔' }]), 'utf8'),
+    dateWord: dosWord(2001, 1, 1),
+  };
+
+  test('ZIP 中央目錄的日期一路走到 meta.source_version', () => {
+    const { stdout, pool } = runBuildPool(makeZip([
+      decoy,
+      { name: '42_5.json', content: dataFile(sourceRows()), dateWord: dosWord(2026, 8, 3) },
+    ]));
+    assert.equal(pool.meta.source_version, '2026-08-03',
+      'C6 的資料版本仍未進到產物——這正是 SC-2 原本的病徵');
+    assert.equal(pool.meta.source_file, '42_5.json', '依 schema 選檔，不得挑到誘餌');
+    assert.match(stdout, /資料版本 2026-08-03/, '建置 log 也應印出資料版本');
+    // 前端的判斷是 `if (m.source_version)`——這裡驗的就是那個條件會成立
+    assert.ok(pool.meta.source_version, '前端的 if (m.source_version) 仍不成立');
+  });
+
+  test('ZIP 無合法日期時不寫欄位，不得填 null 或 "undefined"', () => {
+    // 〔堵〕`source_version: mtime` 無條件寫入時，缺日期就變成 null——
+    //       前端 `if (m.source_version)` 雖然仍不成立，但 verify-data 的
+    //       格式檢查會把 null 判成 C6 失敗，整批資料更新被一個顯示欄位擋掉
+    const { pool } = runBuildPool(makeZip([
+      { name: '42_5.json', content: dataFile(sourceRows()), dateWord: 0 },
+    ]));
+    assert.equal('source_version' in pool.meta, false,
+      `無合法日期時不得寫出 source_version（實得 ${JSON.stringify(pool.meta.source_version)}）`);
+  });
+
+  test('meta 仍不得含執行時間（B7 冪等）', () => {
+    // 同一份來源建兩次，產物必須位元相同
+    const zip = makeZip([
+      { name: '42_5.json', content: dataFile(sourceRows()), dateWord: dosWord(2026, 8, 3) },
+    ]);
+    const a = runBuildPool(zip).pool;
+    const b = runBuildPool(zip).pool;
+    assert.deepEqual(a, b, '同一份來源建出不同產物 → meta 含執行時間或有其他非決定性');
+    const timeish = Object.keys(a.meta).filter((k) => /time|generated|updated_at/i.test(k));
+    assert.deepEqual(timeish, [], `meta 含執行時間欄位：${timeish.join(', ')}`);
+  });
+});
+
 // ══ 管線腳本可被 import（前提條件）═══════════════════════════════════
 
 describe('build-pool 的純函式可在不觸發下載的情況下 import', () => {
-  test('module-main guard 存在', () => {
+  test('module-main guard 存在（靜態）', () => {
     // 沒有這道 guard 的話，上面每一條測試在 import 當下就會真的去下載 TFDA 來源，
     // CI 會因為外部網路而隨機紅，而且 data/ 可能被改寫
     const src = fs.readFileSync(path.join(ROOT, 'tools/build-pool.mjs'), 'utf8');
     assert.match(src, /import\.meta\.url/, 'main() 必須以 module-main guard 包住');
     assert.doesNotMatch(src, /^main\(\)\.catch/m, 'main() 仍在模組層無條件執行');
+  });
+
+  test('〔TG-4〕import 不觸發 main()：子行程實跑', () => {
+    // 〔堵〕上面那條只驗字樣。`if (true) main(); void import.meta.url;` 照樣全綠。
+    //       這裡真的起子行程 import；main() 若跑起來會印出 `[1/8] 下載 …`
+    //       並真的去打 TFDA，兩種情況都看得見
+    const url = pathToFileURL(path.join(ROOT, 'tools/build-pool.mjs')).href;
+    const out = execFileSync(process.execPath,
+      ['--input-type=module', '-e',
+        `const m = await import(${JSON.stringify(url)});`
+        + `console.log('IMPORTED_CLEAN', typeof m.dosDateToISO, typeof m.isSha256);`],
+      { cwd: ROOT, encoding: 'utf8', timeout: 30_000 });
+    assert.match(out, /IMPORTED_CLEAN function function/, 'import 未正常返回具名匯出');
+    assert.doesNotMatch(out, /\[1\/8\]/, 'import 觸發了 main()，管線真的跑起來了');
+  });
+
+  test('〔TG-4〕四種呼叫方式都必須進 main()（guard 不得反向失效）', () => {
+    // 〔堵〕guard 條件寫錯（例如與 undefined 比對）會讓直接執行變成
+    //       「什麼都不做、退出碼 0」——排程從此靜默空轉，而 import 那條完全看不出來。
+    //       `process.argv[1]` 的形式因呼叫方式而異，這正是 guard 唯一的輸入。
+    //       npm script 就是 `node tools/build-pool.mjs`（cwd 為 ROOT），與第一案同形
+    const abs = path.join(ROOT, 'tools/build-pool.mjs');
+    const specs = [
+      ['相對路徑（= npm run build:pool）', 'tools/build-pool.mjs'],
+      ['帶 ./ 的相對路徑', './tools/build-pool.mjs'],
+      ['絕對路徑', abs],
+      ['平台原生分隔符', abs.split(path.sep).join(path.sep)],
+    ];
+    for (const [label, spec] of specs) {
+      try {
+        execFileSync(process.execPath, [spec, '--source', 'no-such-file.zip'],
+          { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
+        assert.fail(`${label}：來源不存在卻退出碼 0 —— main() 沒被執行到`);
+      } catch (e) {
+        assert.equal(e.status, 1, `${label}：預期退出碼 1，實得 ${e.status}`);
+        assert.match(String(e.stdout ?? '') + String(e.stderr ?? ''), /ENOENT|本機來源/,
+          `${label}：main() 未進入取得來源那一步`);
+      }
+    }
   });
 });

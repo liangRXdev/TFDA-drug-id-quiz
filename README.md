@@ -64,10 +64,12 @@ Q4 與 Q5 是刻意的：只憑「圓形／白色／無刻痕」無法唯一辨�
 
 ## 開發
 
-需 Node ≥22（`node --test` 的 glob 展開自 Node 21 起才有）。
+需 Node ≥22（`node --test` 的 glob 展開自 Node 21 起才有）**與 uv**——
+`npm test` 有一組驗收要真的用 Pillow 解碼損毀的 WebP，那件事只有 Python 端做得到
+（見 `tests/fetch_images_probe.py`）。缺 uv 時該組**直接失敗而不是跳過**。
 
 ```bash
-npm test                 # engine、難度分級、閃卡、UI 接線、娛樂性強化與 SW 界線（272 項）
+npm test                 # engine、難度分級、閃卡、UI 接線、娛樂性強化、資料管線與 SW 界線（306 項）
 npm run build:pool       # 抓取來源 → data/pool.json
 npm run fetch:images     # 鏡像圖片 → data/img/*.webp（需 uv）
 npm run verify           # 資料完整性驗證
@@ -93,6 +95,7 @@ tools/make-icons.py           由 icon.svg 幾何重繪 PWA 圖示（uv + Pillow
 tools/verify-data.mjs         資料完整性驗證
 tests/gold-set.json           47 筆人工確認的品名 → 答案鍵對照
 tests/_ui-harness.mjs         最小 DOM 樁（刻意不引入 jsdom）
+tests/fetch_images_probe.py   fetch-images.py 的行為探針（真 Pillow；由 fetch-images.test.mjs 驅動）
 .ai-review/plan.md            規格 v2（單一難度）
 .ai-review/plan-v3-levels.md  規格 v3.6（難度分級），含驗收條件與歷次修訂的理由
 .ai-review/verdict-*.md       歷次獨立覆審的逐項判定

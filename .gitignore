@@ -6,3 +6,9 @@ fetch.log
 
 # G1 gate 樣本為產生物，2MB 且可由 g1-sample.mjs 以固定 seed 重現
 .ai-review/g1-sample.html
+
+# tests/fetch_images_probe.py 以模組載入 tools/fetch-images.py，每次跑測試都會產生
+__pycache__/
+
+# build-pool.mjs 的實跑輸出（--out .probe/…），不進 repo
+.probe/

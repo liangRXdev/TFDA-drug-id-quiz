@@ -236,12 +236,26 @@ v3.6 已因同樣理由移除過 `usedAns` 與 `slotAsset[]`。
    不動 `width`/`height`/`margin`/`padding`/`font-size`/`border-width`。
 4. **驗證方式受 F13 限制**：CSS cascade 與 layout **不能**在現有 stub 上驗。
    拆為「靜態 CSS 原始碼契約（自動）」＋「真實瀏覽器人工留檔」兩層（見 C25／C27）。
-5. 〔**v4.3 依 verdict-v4a CR-1／SC-1 新增**〕**動畫只能由 CSS 產生，JS 不得自帶**。
-   `app.js` 不得出現 `behavior: 'smooth'`、`scrollIntoView({ behavior })`、`Element.animate()`、
-   `requestAnimationFrame` 驅動的視覺補間。
+5. 〔**v4.3 依 verdict-v4a CR-1／SC-1 新增；v4.4 依 verdict-v4b TG-7 收窄**〕
+   **動畫只能由 CSS 產生，JS 不得自帶**。
    **理由**：條 1 的正向表列以 CSS `@media` 為載體，JS 端動畫繞過整套管控；
    為了保留單一捲動效果而在 JS 引入 `matchMedia` 分支，等於開第二套動畫管控機制。
-   捲動一律用 `window.scrollTo(0, 0)`。**由 C25 的靜態契約強制**。
+   捲動一律用 `window.scrollTo(0, 0)`。
+
+   **自動強制的部分——`app.js` 不得出現下列 API（明列，由 C25 的靜態契約掃描）**：
+
+   | 契約樣式 | 涵蓋 |
+   |---|---|
+   | `behavior\s*:` | `scrollTo`／`scrollBy`／`scroll`／`scrollIntoView` 的平滑捲動選項（不綁特定方法名） |
+   | `scrollIntoView\s*\(\s*\{` | `scrollIntoView` 帶選項物件 |
+   | `\.animate\s*\(` | Web Animations API |
+   | `requestAnimationFrame` | rAF 驅動的視覺補間 |
+
+   **人工把關的部分**：`setInterval`／`setTimeout` 逐格改 `el.style.*` 這類
+   計時器驅動的動畫**攔不到**，且無法靜態窮舉。
+   〔TG-7〕原文寫成廣義宣稱（「JS 不得自帶動畫」）而只列出部分向量，
+   等於承諾了契約做不到的事；追每一個向量會變成軍備競賽。
+   因此**明列上表為自動強制的範圍，其餘由真實瀏覽器人工留檔把關**（同條 4 的兩層結構）。
 
 ### D28 — 錯題再戰：兩階段，沿用 D19 的整卷模型
 
@@ -515,6 +529,7 @@ finish() ─▶ 若 mode === 'quiz' ─▶ 讀最新值 → 各項取 max → �
 
 | 版本 | 日期 | 內容 |
 |---|---|---|
+| **v4.4** | **2026-08-07** | 依 `verdict-v4b.md` 修訂 **D27 條 5**（TG-7，部分接受）。<br>原文以廣義宣稱「JS 不得自帶動畫」開頭，卻只列出四個向量——**承諾了契約做不到的事**。實跑證實 `setInterval` 逐格改 `el.style.transform` 攔不到（53/53 全綠）。改為**明列自動強制的 API 清單**（並記錄 `behavior\s*:` 不綁方法名，故 `window.scroll({ behavior })` 也攔得到——Codex 在此處的子主張經實跑反證，52/1），其餘誠實寫明由人工瀏覽器留檔把關。<br>**這一項修的是規格文字，不是程式碼**：追每一個 JS 動畫向量會變成軍備競賽 |
 | **v4.1** | **2026-08-05** | 依 `plan-verdict-v4.md` 修訂（接受 49／部分接受 3／拒絕 0，範圍蔓延 0；Blocker 6 列／High 25）。<br>**三個 Blocker：**<br>• **〔2-1／4-2〕D28 整段重寫**：原「逐鍵 API `buildQuestionForKey(index, level, ans, …)`」缺整卷正解集合，H2 在建構期無從保證。改為沿用 D19 的兩階段，唯一差別是第一階段的正解集合由錯題鍵**固定**而非隨機抽出。F14 佐證 `buildChoices` 早有 `excludeAns`<br>• **〔1-1〕複習途中圖片失敗**：原規格未定義，會沿用 `voidCurrent()` → `drawSpareQuestion()` 抽入**任意未使用鍵**，複習卷因而混入原本沒答錯的藥且畫面看不出來（F15）。改為整卷中止回原成績<br>• **〔2-2／3C-23／3C-25／3C-27〕C23／C25／C27 不可自動化**：`_ui-harness.mjs` 的 `style` 是純物件，無 `getComputedStyle`／`getBoundingClientRect`／`matchMedia`，刻意不引入 jsdom（F13）。寫成自動測試必然假綠——正是上一輪「假斷言」教訓的重演。改為靜態 CSS 原始碼契約（同 C17 先例）+ 人工瀏覽器留檔。C27 另修一個**假陽性**：真實 `getBoundingClientRect()` 含 `transform`，會把 D27 明文允許的 scale 誤判為位移 → 改驗 document flow 佔位<br>**架構層：**<br>• **〔2-3／2-4／4-1〕D24 移除 `rankValue` 序數**——序數可任意指定，與使用者看到的字串無可證明關聯，是第二份真相。改為「表就是唯一真相 + 各級詞彙不相交 + 稱號永遠與級別徽章同框」。原本的形式化跨級單調本身就是 D26 拒絕的東西；改以較弱但可證偽的「L1／L2 不得含精熟意涵詞」保住防刷簡單級的原始目的<br>• **〔2-5〕新增 D31 session ownership**：`finish()`／`downloadCard()` 直接讀 `state.questions`，M5 必須先定義原卷快照與 `state.mode`，且返回後一律由快照**重新衍生**而非回填 DOM 字串<br>• **〔1-3／3-X〕新增 D32 M1／M2 的可見 UI 契約 + C32 跨層 e2e**——v4.0 的 A23–A29 全在 engine 層，**沒有一條證明 streak 與稱號接到畫面上**，與上一輪「測試全綠、功能靜默不存在」同形<br>• **〔1-2〕只允許一層複習**；**〔4-5〕稱號不進成績卡**；**〔4-6〕M4 收斂為 transition + 單一 transform，不做 `@keyframes`**；**〔2-6〕reduced-motion 範圍含既有兩條 transition**；**〔2-7〕每批無條件升 CACHE 版本**<br>**儲存契約：**<br>• 〔1-5〕嚴格大於才更新；〔1-6〕完整有效性 predicate；〔1-7〕「新紀錄！」只在持久化確認後顯示；〔1-8〕「不覆寫」精確化為零 storage mutation；〔1-9〕清除的取消／失敗路徑；〔1-10〕失效情境改為 E1–E7 逐條編號；〔4-7〕更正單一 key 的理由（localStorage **無**跨分頁交易原子性）<br>• **〔1-4，部分接受〕跨分頁寫入**：採「寫入前重讀、各項取 max」的順序約束（+C33），**拒絕** `storage` 事件／`BroadcastChannel`／鎖等新元件。規格誠實寫明這**不消除競態**，只把後果從「紀錄倒退」降為「極短窗口漏記一次」<br>**驗收：** A23–A35、C18–C31 全面重寫，新增 C32／C33。Codex 逐條指出 v4.0 的〔堵〕堵不住，其中最關鍵三條：**A23 回傳答對總數即可全過**（缺答錯切段案例）、**A26 永遠回傳 0 即可全過**（只有「不爆炸」的邊界）、**A32 誘答很多樣但正解永遠固定同格**（位置記憶完全沒打散，而這正是 M5 的核心風險）。〔4-3〕A32／A35 的統計門檻改為 controlled RNG——v3 A21 用統計門檻是因母體為 3000 個答案鍵，此處母體是單一鍵的合法誘答組合，可能只有個位數 |
 | v4.0 | 2026-08-05 | 初版。M1–M5；D23–D30；A23–A35、C18–C31。實測 F8–F12。<br>F8 推翻了「每個答案鍵至少 3 筆紀錄」的誤讀；F9 確認不存在「未滿卷」的結算路徑 |
 
