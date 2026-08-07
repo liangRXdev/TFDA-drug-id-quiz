@@ -552,6 +552,31 @@ export function buildChoices(correct, index, { level, rng, excludeAns } = {}) {
 }
 
 /**
+ * 【階段 2 ＋ 3】把**已決定的正解紀錄陣列**組成整卷並驗證（規格 D19）。
+ *
+ * 正常卷與複習卷的差別**只在階段 1**（正解集合怎麼來），階段 2、3 由這裡
+ * 單一實作。v3 花了兩輪覆審才把組裝模型弄對，複製一份影子版本＝把那兩輪的
+ * 結論分岔成兩處，日後只會有一處被修（覆審 M-8）。
+ *
+ * `excludeAns` 恆為**整卷正解集合**（H2），因此必須先有完整的 corrects
+ * 才能組任何一題——逐題邊抽邊組會讓後補的正解回溯破壞先前題目的 H2。
+ *
+ * @throws {Error} code = 'NO_DISTRACTORS' | 'INVARIANT_VIOLATED'
+ */
+function assembleQuiz(corrects, idx, { level, rng }) {
+  const excludeAns = new Set(corrects.map((c) => c.ans));
+  const baseChance = level === Level.L3 ? CHANCE.NONE : CHANCE.FOUR;
+  const quiz = corrects.map((c, i) => newQuestion(c, {
+    token: i + 1,                                        // 遞補不重用（D18）
+    level,
+    chance: baseChance,
+    ...(level === Level.L3 ? {} : buildChoices(c, idx, { level, rng, excludeAns })),
+  }));
+  assertQuizInvariants(quiz, level, idx);                // D19 最後一步
+  return quiz;
+}
+
+/**
  * 整卷生成（規格 D19 兩階段）。
  *
  * 先定完整正解集合再組選項——逐題組裝會讓後補的正解**回溯破壞**
@@ -581,23 +606,12 @@ export function drawLeveledQuiz(items, { level, n = QUIZ_SIZE, rng = Math.random
     throw err;
   }
   const pool = items.filter((it) => eligible.has(it.ans));
-  const baseChance = level === Level.L3 ? CHANCE.NONE : CHANCE.FOUR;
 
   let last;
   for (let attempt = 0; attempt < MAX_QUIZ_ATTEMPTS; attempt++) {
-    const corrects = drawQuiz(pool, n, rng);            // 答案鍵均勻（v2 D5）
-    const excludeAns = new Set(corrects.map((c) => c.ans));
     try {
-      const quiz = corrects.map((c, i) => newQuestion(c, {
-        token: i + 1,                                    // 遞補不重用（D18）
-        level,
-        chance: baseChance,
-        ...(level === Level.L3
-          ? {}
-          : buildChoices(c, idx, { level, rng, excludeAns })),
-      }));
-      assertQuizInvariants(quiz, level, idx);            // D19 最後一步
-      return quiz;
+      // 【階段 1】正解集合隨機抽出，答案鍵均勻（v2 D5）
+      return assembleQuiz(drawQuiz(pool, n, rng), idx, { level, rng });
     } catch (e) {
       if (e.code !== 'NO_DISTRACTORS') throw e;          // 含 INVARIANT_VIOLATED：重抽只會掩蓋 bug
       last = e;
@@ -814,7 +828,7 @@ export function wrongAnsKeys(questions) {
  * 錯題卷組裝（規格 D28 兩階段 + D28.1 原子發布點）。
  *
  * **與 `drawLeveledQuiz` 唯一的差別在階段 1**：整卷正解集合由 `ansKeys`
- * **固定**而非隨機抽出。階段 2、3 完全共用同一條路徑——
+ * **固定**而非隨機抽出。階段 2、3 由 `assembleQuiz()` 共用同一條路徑——
  * v3 花了兩輪覆審才把第一套組裝模型弄對，不再開第二套。
  *
  * 分級重建（依 F8：82.1% 的鍵只有 1 筆紀錄）：
@@ -847,26 +861,14 @@ export function drawRetryQuiz(items, { level, ansKeys, rng = Math.random, index,
     throw err;
   }
 
-  // 【階段 1】整卷正解集合＝K，固定不抽。這是與 D19 唯一的差別
-  const excludeAns = new Set(keys);
-  const baseChance = level === Level.L3 ? CHANCE.NONE : CHANCE.FOUR;
-
   let last;
   for (let attempt = 0; attempt < MAX_QUIZ_ATTEMPTS; attempt++) {
     try {
-      // 【階段 2】逐題組裝，excludeAns 恆為整卷正解集合（H2）
-      const quiz = keys.map((ans, i) => {
-        const it = pick(idx.byAns.get(ans), rng);      // 紀錄重抽；只有 1 筆時即沿用
-        return newQuestion(it, {
-          token: i + 1,
-          level,
-          chance: baseChance,
-          ...(level === Level.L3 ? {} : buildChoices(it, idx, { level, rng, excludeAns })),
-        });
-      });
-      // 【階段 3】整卷驗證，與正常卷同一個 validator
-      assertQuizInvariants(quiz, level, idx);
-      return quiz;
+      // 【階段 1】整卷正解集合＝K，固定不抽。這是與 D19 唯一的差別。
+      // 每次 attempt 都重跑 `pick`：紀錄重抽，只有 1 筆時 pick 必然回傳那一筆，
+      // 於是「沿用原圖」是自然結果而非特例分支
+      return assembleQuiz(
+        keys.map((ans) => pick(idx.byAns.get(ans), rng)), idx, { level, rng });
     } catch (e) {
       if (e.code !== 'NO_DISTRACTORS') throw e;        // 含 INVARIANT_VIOLATED：重抽只會掩蓋 bug
       last = e;

@@ -740,7 +740,14 @@ function voidCurrent(reason) {
   // 使用者會以為自己複習完了全部錯題。這是 M5 專屬的第一順位風險。
   if (state.mode === 'retry') {
     const origin = state.origin;
-    if (!origin) return fatal('複習狀態已遺失，無法回到原成績。');
+    // 先清乾淨再走失敗路徑（覆審 M-9）。直接 fatal 會讓狀態停在
+    // `mode='retry'` 而 `origin=null`——那是**永久卡住**的組合：
+    // 之後每一次 voidCurrent 都會再 fatal 一次，且 startRetry 的冪等守衛
+    // 看到 mode='retry' 就永遠 no-op，使用者只能重整頁面
+    if (!origin) {
+      clearRetryState();
+      return fatal('複習狀態已遺失，無法回到原成績。');
+    }
     state.questions = origin.questions;
     state.quizLevel = origin.quizLevel;
     state.idx = state.questions.length;
@@ -1291,15 +1298,76 @@ function retryFailed(msg) {
 }
 
 /**
+ * L2 的資源前置條件：把候選卷**每一格**的圖片先載完（規格 D28.1、覆審 M-1）。
+ *
+ * 沒有這一步，L2 的複習卷會是「先發布再回滾」——切進答題頁之後才發現某張圖
+ * 載不動，於是 `voidCurrent()` 把整次複習終止並退回原成績。使用者看到的是
+ * 「按下去、畫面跳走、又跳回來」，而 D28.1 加上這條前置條件的目的正是消掉回滾。
+ *
+ * 節點刻意不掛進 DOM：這裡只要把資源送進瀏覽器快取並確認它可解碼，
+ * 真正的 `<img>` 稍後由 `renderGrid()` 建立（同一個 src 直接命中快取）。
+ * **這不取代 ready-gate**——快取仍可能在期間被逐出，`loadCell()` 的逾時與
+ * `failCell()` 因此保留。
+ *
+ * @returns {Promise<boolean>} 全部成功才是 true；任何一張失敗或逾時即 false
+ */
+function preloadGridImages(quiz) {
+  const srcs = [...new Set(quiz.flatMap((q) => q.options.map((o) => DATA_DIR + o.img)))];
+  const one = (src) => new Promise((resolve) => {
+    const img = document.createElement('img');
+    let settled = false;
+    const settle = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(ok);
+    };
+    // 逾時與 loadCell 同一個常數。永久 pending 的圖沒有逾時就會讓
+    // 「錯題再戰」按下去之後永遠沒有反應——比失敗提示更難理解
+    const timer = setTimeout(() => settle(false), L2_LOAD_TIMEOUT_MS);
+    img.onload = () => settle((img.naturalWidth ?? 1) > 0);   // 零尺寸視同失敗
+    img.onerror = () => settle(false);
+    img.src = src;
+  });
+  return Promise.all(srcs.map(one)).then((oks) => oks.every(Boolean));
+}
+
+/**
+ * **D28.1 的發布點本身**。呼叫到這裡代表三個前置條件都已成立：
+ * 候選卷完整建構、`validateQuizInvariants()` 回空、該級的資源前置條件成立。
+ *
+ * 抽成獨立函式不只是整理：L2 的發布發生在 Promise 回呼裡，
+ * 兩條入口共用同一段發布程式碼才能保證「L2 少做了一步」不會悄悄發生。
+ */
+function publishRetry(quiz) {
+  state.origin = {
+    // **只存原始欄位**（D31 單一真相來源）。分數、稱號、基線、最長連對
+    // 一律由這兩個欄位重算——多存一份可重算的值就多一個會分歧的來源
+    questions: state.questions,
+    quizLevel: state.quizLevel,
+  };
+  state.mode = 'retry';
+  state.retryBuilding = false;
+  state.questions = quiz;
+  state.idx = 0;
+  state.voided = 0;
+  state.nextToken = quiz.length + 1;
+  show($('result'), false);
+  show($('quiz'));
+  renderQuestion();
+}
+
+/**
  * 進入錯題再戰。
  *
- * **D28.1 原子發布點**：候選卷完整建構且通過整卷驗證之前，
- * `state.mode`、`state.origin` 與畫面一律不動。因此發布前的任何失敗都是
- * 「還沒開始」而不是「回滾」——不需要第二套回滾狀態流程。
+ * **D28.1 原子發布點**：候選卷完整建構、通過整卷驗證、**且該級的資源前置條件
+ * 成立**之前，`state.mode`、`state.origin` 與畫面一律不動。因此發布前的任何
+ * 失敗都是「還沒開始」而不是「回滾」——不需要第二套回滾狀態流程。
  */
 function startRetry() {
   // D31 冪等：建構中或已在複習中，第二次起一律 no-op。
-  // 雙擊是真實情境，而覆寫 origin 會讓返回時拿到複習卷的成績
+  // 雙擊是真實情境，而覆寫 origin 會讓返回時拿到複習卷的成績。
+  // L2 的建構含非同步預載，`retryBuilding` 因此要撐過整個等待期間
   if (state.retryBuilding || state.mode === 'retry' || state.origin) return;
 
   const ansKeys = wrongAnsKeys(state.questions);
@@ -1331,22 +1399,21 @@ function startRetry() {
     return retryFailed(e.message);
   }
 
-  // ── 發布點：以下才開始改變使用者可見的狀態 ──
-  state.origin = {
-    // **只存原始欄位**（D31 單一真相來源）。分數、稱號、基線、最長連對
-    // 一律由這兩個欄位重算——多存一份可重算的值就多一個會分歧的來源
-    questions: state.questions,
-    quizLevel: state.quizLevel,
-  };
-  state.mode = 'retry';
-  state.retryBuilding = false;
-  state.questions = quiz;
-  state.idx = 0;
-  state.voided = 0;
-  state.nextToken = quiz.length + 1;
-  show($('result'), false);
-  show($('quiz'));
-  renderQuestion();
+  // L2：ready-gate 是這一級的資源前置條件，必須在發布前就成立（D28.1）
+  if (LEVELS[level].grid) {
+    preloadGridImages(quiz).then((ok) => {
+      // 等待期間使用者可能已按「再測一回」或返回起始頁——那兩條都會
+      // `clearRetryState()`。此時發布等於把畫面搶回複習卷
+      if (!state.retryBuilding) return;
+      if (!ok) {
+        state.retryBuilding = false;
+        return retryFailed('複習卷的藥品圖片載入失敗');
+      }
+      publishRetry(quiz);
+    });
+    return;
+  }
+  publishRetry(quiz);
 }
 
 /**
@@ -1357,7 +1424,14 @@ function startRetry() {
  * 返回完成後 `origin` 清為 `null`：不清的話，下一個正常回合的結算會讀到殘留快照。
  */
 function exitRetry() {
-  if (state.mode !== 'retry' || !state.origin) return;
+  if (state.mode !== 'retry') return;    // 不在複習中：控制項本來就隱藏，這是防禦性的
+  // `mode='retry'` 卻沒有 origin 是不該存在的組合。**不能只是 no-op**——
+  // no-op 會讓它永久停在那裡，返回鍵從此按不動（覆審 M-9）。
+  // 清乾淨再明說失敗，使用者至少能重新開始
+  if (!state.origin) {
+    clearRetryState();
+    return fatal('複習狀態已遺失，無法回到原成績。');
+  }
   const origin = state.origin;
   state.questions = origin.questions;
   state.quizLevel = origin.quizLevel;

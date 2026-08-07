@@ -99,23 +99,36 @@ describe('A30 錯題集合定義（純函式）', () => {
 // ══ 分層樣本（A31／A35 共用）══════════════════════════════════════════
 
 /**
+ * 每層要取的鍵數。**規格 A31 寫的是「各 ≥20 個 distinct 鍵」**——
+ * 實作原本寫 6，且 `shortest`／`longest` 只取 3（覆審 M-5）。
+ * 「規格宣稱有、實作做弱了」而中間只隔幾小時：
+ * **規格與實作由同一人先後完成，並不會讓兩者自動一致。**
+ */
+const PER_STRATUM = 20;
+
+/**
  * 固定 seed 的分層樣本。
  *
  * 〔堵〕「≥200 個隨機鍵」會有重複、不可重現，而且守備力被資料分布稀釋——
  *       2026-08-07 的 C8 斷言就是這樣錯了很久才被題庫更新照出來。
  * **不寫死鍵名或數量**：題庫每月更新，寫死就會在下一次更新時假紅或假綠。
+ *
+ * `two`（恰 2 筆）與 `many`（≥5 筆）**分開**，不合併成一個「多筆」池——
+ * 合併後按比例判定可能完全沒測到恰 2 筆那一類（覆審 M-14）。
  */
-function strata(level, perStratum = 6) {
+function strata(level, perStratum = PER_STRATUM) {
   const idx = index();
   const el = eligible(level);
   const single = [];
-  const multi = [];
+  const two = [];
+  const few = [];
   const many = [];
   for (const [ans, recs] of idx.byAns) {
     if (!el.has(ans)) continue;
     if (recs.length === 1) single.push(ans);
+    else if (recs.length === 2) two.push(ans);
     else if (recs.length >= 5) many.push(ans);
-    else multi.push(ans);
+    else few.push(ans);
   }
   const rng = makeRng(4242);
   const take = (arr, n) => {
@@ -126,22 +139,42 @@ function strata(level, perStratum = 6) {
     }
     return copy.slice(0, Math.min(n, copy.length));
   };
-  const noFuzzy = take([...new Set(POOL.meta.no_fuzzy ?? [])]
-    .filter((k) => el.has(k)), perStratum);
+  const noFuzzy = [...new Set(POOL.meta.no_fuzzy ?? [])].filter((k) => el.has(k));
   const byLen = [...el].sort((a, b) => a.length - b.length);
   return {
     single: take(single, perStratum),
-    multi: take(multi, perStratum),
+    two: take(two, perStratum),
+    few: take(few, perStratum),
     many: take(many, perStratum),
-    noFuzzy,
-    shortest: byLen.slice(0, 3),
-    longest: byLen.slice(-3),
+    noFuzzy: take(noFuzzy, perStratum),
+    shortest: byLen.slice(0, perStratum),
+    longest: byLen.slice(-perStratum),
+    // 母體大小，供「取不滿 20 是資料的上限，不是實作偷懶」的斷言用
+    sizes: {
+      single: single.length, two: two.length, few: few.length,
+      many: many.length, noFuzzy: noFuzzy.length, shortest: el.size, longest: el.size,
+    },
   };
+}
+
+/**
+ * 每層都必須**要嘛取滿 perStratum，要嘛把整層取完**。
+ * 〔堵〕悄悄把某層改成只取 3 個，樣本仍「看起來有分層」而守備力掉一個量級
+ */
+function assertStrataDepth(s, perStratum = PER_STRATUM) {
+  for (const k of ['single', 'two', 'few', 'many', 'noFuzzy', 'shortest', 'longest']) {
+    const got = s[k].length;
+    const pop = s.sizes[k];
+    assert.equal(new Set(s[k]).size, got, `${k} 層有重複鍵`);
+    assert.ok(got >= Math.min(perStratum, pop),
+      `${k} 層只取了 ${got} 個鍵（母體 ${pop}，規格要求 ≥${perStratum} 或取完整層）`);
+  }
 }
 
 const allStrata = (level) => {
   const s = strata(level);
-  return [...new Set([...s.single, ...s.multi, ...s.many, ...s.noFuzzy,
+  assertStrataDepth(s);
+  return [...new Set([...s.single, ...s.two, ...s.few, ...s.many, ...s.noFuzzy,
     ...s.shortest, ...s.longest])];
 };
 
@@ -152,7 +185,9 @@ describe('A31 組裝輸出的逐欄契約（固定 seed 分層樣本）', () => 
     test(`${level}：逐欄契約成立，且輸入未被改動`, () => {
       need();
       const keys = allStrata(level);
-      assert.ok(keys.length >= 15, `分層樣本僅 ${keys.length} 個鍵，樣本過小`);
+      // 七層各 ≥20（或取完整層）→ 去重後不可能低於 PER_STRATUM
+      assert.ok(keys.length >= PER_STRATUM * 3,
+        `分層樣本僅 ${keys.length} 個 distinct 鍵，樣本過小`);
 
       const idx = index();
       const before = JSON.stringify(ITEMS.slice(0, 50));
@@ -231,12 +266,19 @@ describe('A31 組裝輸出的逐欄契約（固定 seed 分層樣本）', () => 
 
 describe('A32 正解格位置可達性（L1／L2 分別驗）', () => {
   for (const level of [Level.L1, Level.L2]) {
-    test(`${level}：至少 3 個 answerIdx 可達，且同序列可重現`, () => {
+    test(`${level}：每一個鍵的 answerIdx 都至少 3 個值可達（逐鍵，非比例）`, () => {
       // 〔堵〕**誘答集合很多樣但正解永遠固定同一格**——位置記憶完全沒被打散。
-      //       只驗 L1 的話，L2 固定位置照樣全綠
+      //       只驗 L1 的話，L2 固定位置照樣全綠。
+      // 規格 A32 是**逐鍵**性質（「同一鍵在指定的不同 RNG 序列下 answerIdx
+      // 至少 3 個值可達」），實作原本寫成「80% 的鍵達標」（覆審 M-13）——
+      // 比例門檻讓 20% 的鍵可以永遠固定同格而測試全綠，
+      // 而規格自己的〔堵〕還特別寫了「統計門檻在合法組合少的鍵上會 flaky」。
+      // 樣本刻意涵蓋各層（單筆／恰 2 筆／多筆／noFuzzy／最短／最長）
       need();
-      const keys = allStrata(level).filter((k) => index().byAns.get(k).length >= 1).slice(0, 5);
-      let ok = 0;
+      const s = strata(level, 3);
+      const keys = [...new Set([...s.single, ...s.two, ...s.few, ...s.many,
+        ...s.noFuzzy, ...s.shortest, ...s.longest])];
+      assert.ok(keys.length >= 12, `樣本僅 ${keys.length} 個鍵`);
       for (const ans of keys) {
         const seen = new Set();
         for (let seed = 1; seed <= 40; seed++) {
@@ -245,10 +287,9 @@ describe('A32 正解格位置可達性（L1／L2 分別驗）', () => {
           });
           seen.add(q.answerIdx);
         }
-        if (seen.size >= 3) ok++;
+        assert.ok(seen.size >= 3,
+          `${level} ${ans}：40 個序列下 answerIdx 只出現 ${seen.size} 種（${[...seen]}）`);
       }
-      assert.ok(ok >= Math.ceil(keys.length * 0.8),
-        `${level}：${keys.length} 個鍵中只有 ${ok} 個的 answerIdx 達到 3 種以上`);
     });
 
     test(`${level}：相同 RNG 序列完全重現`, () => {
@@ -316,6 +357,75 @@ describe('A34 建構器失敗時不回傳部分結果', () => {
       '重複的錯題鍵必須被整卷驗證擋下，不得組出一份違反 H1 的複習卷');
   });
 
+  /**
+   * 合成題庫：讓失敗**發生在組題迴圈中途**，而不是被前置檢查提前擋下。
+   *
+   * 〔堵〕原本的注入用假鍵（`ZZZ_NOT_A_REAL_KEY`），而 `drawRetryQuiz` 的
+   *       `KEY_NOT_ELIGIBLE` 檢查排在組題迴圈**之前**——那條測試根本沒進到迴圈，
+   *       「先寫入部分結果再拋錯」因此完全沒被覆蓋（覆審 M-11）。
+   *
+   * 構造：兩群同形同色、刻字互異的紀錄。
+   * - `ROUND/WHITE`：`ALPHAZOL` ＋ 5 個 filler（filler 不在 ansKeys 內）
+   * - `OVAL/BLUE`：6 個彼此就是彼此**僅有**候選的鍵
+   *
+   * 每個鍵單獨看都 eligible（各有 5 個候選，等於 L2 的 `DISTRACTOR_COUNT`），
+   * 因此前置檢查全數放行；但整卷的 `excludeAns` 含全部 6 個 OVAL 鍵之後，
+   * 第 2 題起再也湊不到誘答 → 迴圈中途拋 `NO_DISTRACTORS`。
+   *
+   * 藥名刻意兩兩差異極大：`nameCollides` 把編輯距離 ≤1 與前綴關係都判為碰撞，
+   * `FILLER1MIDE`／`FILLER2MIDE` 這種序號命名會讓整個合成題庫變成不 eligible。
+   */
+  const rec = (ans, shape, color, mark1) => ({
+    id: `${ans}-1`, ans, full: `${ans} 10MG`, zh: `合成藥${ans}`,
+    img: `img/${ans}.webp`, shape: [shape], color: [color],
+    score_mark: ['無'], size: '8', mark1, mark2: '',
+  });
+  const ROUND_KEYS = ['ALPHAZOL', 'BRAVOMYCIN', 'CHARLIEPINE', 'DELTACORT',
+    'ECHOSTATIN', 'FOXTROMIDE'];
+  const OVAL_KEYS = ['GOLFACIN', 'HOTELAMIDE', 'INDIAZINE', 'JULIETTEX',
+    'KILOPRIL', 'LIMAFENAC'];
+  const MARKS = ['AA', 'BB', 'CC', 'DD', 'EE', 'FF'];
+  const SYNTH = [
+    ...ROUND_KEYS.map((k, i) => rec(k, 'ROUND', 'WHITE', `R${MARKS[i]}`)),
+    ...OVAL_KEYS.map((k, i) => rec(k, 'OVAL', 'BLUE', `O${MARKS[i]}`)),
+  ];
+
+  test('組題迴圈**中途**湊不出誘答 → 整個拋出，不回傳部分題卷', () => {
+    need();
+    const idx = buildIndex(SYNTH);
+    const el = eligibleKeys(idx, Level.L2);
+    const keys = [ROUND_KEYS[0], ...OVAL_KEYS];
+
+    // 前置條件：這些鍵**全部通過 eligible 前置檢查**——
+    // 沒有這一條，這條測試就會退化成又一次 KEY_NOT_ELIGIBLE
+    for (const k of keys) assert.ok(el.has(k), `前置條件失效：${k} 未被判為 eligible`);
+
+    // 前置條件：分開組都成得了，證明失敗是「整卷 excludeAns 造成的」而非鍵本身壞掉
+    for (const k of [keys[0], keys[1]]) {
+      const solo = drawRetryQuiz(SYNTH, {
+        level: Level.L2, ansKeys: [k], rng: makeRng(5), index: idx, eligible: el,
+      });
+      assert.equal(solo.length, 1, `${k} 單獨組不出來，前置條件不成立`);
+    }
+
+    let result = 'NOT_THROWN';
+    try {
+      result = drawRetryQuiz(SYNTH, {
+        level: Level.L2, ansKeys: keys, rng: makeRng(5), index: idx, eligible: el,
+      });
+    } catch (e) {
+      result = e;
+    }
+    assert.ok(result instanceof Error, '必須拋出，不得回傳已組好的那幾題');
+    assert.ok(!Array.isArray(result), '不得回傳部分題卷');
+    assert.equal(result.code, 'QUIZ_ASSEMBLY_FAILED',
+      `迴圈中途的 NO_DISTRACTORS 應由整卷重試兜底後轉為 QUIZ_ASSEMBLY_FAILED，實得 ${result.code}`);
+
+    // D20：失敗路徑也不得改動輸入
+    assert.equal(SYNTH.length, 12);
+    assert.deepEqual([...idx.byAns.keys()].sort(), [...new Set(SYNTH.map((r) => r.ans))].sort());
+  });
+
   test('失敗時輸入 items 與 index 深度不變（D20）', () => {
     need();
     const idx = index();
@@ -351,33 +461,37 @@ describe('A35 紀錄重抽用固定 RNG（L1／L2／L3 各驗）', () => {
       }
     });
 
-    test(`${level}：多筆紀錄的鍵在不同序列下不同 id 可達，同序列可重現`, () => {
-      // 〔堵〕**只驗 L3**——D28 對 L1／L2 也要求重抽正解格圖片，
-      //       L1／L2 永遠沿用原圖照樣全綠
-      need();
-      const s = strata(level);
-      const pool = [...s.many, ...s.multi];
-      assert.ok(pool.length, `${level} 找不到多筆紀錄的鍵`);
-      let varied = 0;
-      for (const ans of pool) {
-        const ids = new Set();
-        for (let seed = 1; seed <= 30; seed++) {
-          const [q] = drawRetryQuiz(ITEMS, {
-            level, ansKeys: [ans], rng: makeRng(seed), index: index(), eligible: eligible(level),
-          });
-          ids.add(q.item.id);
+    // 規格明寫「多筆至少覆蓋**恰 2 筆**及**高 multiplicity** 類別」。
+    // 原本把 2–4 筆與 ≥5 筆合併成一個池再算比例，**可能完全沒測到恰 2 筆**
+    // （覆審 M-14）；且比例門檻允許 20% 的鍵永遠沿用原圖（覆審 M-13）。
+    for (const [label, pick] of [['恰 2 筆', (s) => s.two], ['≥5 筆', (s) => s.many]]) {
+      test(`${level}：${label}紀錄的鍵**逐鍵**都換得到不同 id，同序列可重現`, () => {
+        // 〔堵〕**只驗 L3**——D28 對 L1／L2 也要求重抽正解格圖片，
+        //       L1／L2 永遠沿用原圖照樣全綠
+        need();
+        const s = strata(level);
+        const pool = pick(s);
+        assert.ok(pool.length, `${level} 找不到${label}紀錄的鍵`);
+        for (const ans of pool) {
+          const n = index().byAns.get(ans).length;
+          const ids = new Set();
+          for (let seed = 1; seed <= 30; seed++) {
+            const [q] = drawRetryQuiz(ITEMS, {
+              level, ansKeys: [ans], rng: makeRng(seed), index: index(), eligible: eligible(level),
+            });
+            ids.add(q.item.id);
+          }
+          assert.ok(ids.size >= 2,
+            `${level} ${ans}（${n} 筆紀錄）：30 個序列下都是同一筆 —— 沒有真的重抽`);
         }
-        if (ids.size >= 2) varied++;
-      }
-      assert.ok(varied >= Math.ceil(pool.length * 0.8),
-        `${level}：${pool.length} 個多筆鍵中只有 ${varied} 個真的換過紀錄`);
 
-      const ans = pool[0];
-      const one = (seed) => drawRetryQuiz(ITEMS, {
-        level, ansKeys: [ans], rng: makeRng(seed), index: index(), eligible: eligible(level),
-      })[0].item.id;
-      assert.equal(one(5), one(5), '同序列必須重現');
-    });
+        const ans = pool[0];
+        const one = (seed) => drawRetryQuiz(ITEMS, {
+          level, ansKeys: [ans], rng: makeRng(seed), index: index(), eligible: eligible(level),
+        })[0].item.id;
+        assert.equal(one(5), one(5), '同序列必須重現');
+      });
+    }
   }
 });
 
