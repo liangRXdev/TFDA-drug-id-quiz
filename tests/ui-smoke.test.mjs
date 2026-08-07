@@ -318,8 +318,20 @@ describe('L2 ready-gate 與 C8 特徵遮蔽', () => {
 
     assert.ok(hidden('qFeatures'), 'L2 不得顯示外觀特徵格');
     assert.ok(hidden('qImgWrap'), 'L2 不得顯示單張大圖');
-    // 正向：題幹確實有品名
-    assert.ok($('qPrompt').innerHTML.includes(q.item.ans.split(' ')[0]), '題幹應顯示英文品名');
+    // 正向：題幹確實印出**這一筆**的英文品名——沒有這條的話，qPrompt 整個空掉
+    // 也能讓上面的洩漏檢查通過（空字串不含任何特徵值）。
+    //
+    // 〔已發生的假綠燈〕原本比對 `q.item.ans.split(' ')[0]`，但 `ans` 是
+    // **正規化後的答案鍵**（全大寫、去標點），而 qPrompt 印的是原始大小寫的
+    // `item.full`，`includes()` 又是大小寫敏感的。3,913 筆時 seed 4001 剛好抽到
+    // 官方品名本來就全大寫的 `HYZAAR FC` 而全綠；題庫更新到 3,924 筆抽到
+    // `Roopril Tablets 2.5mg "S.C."`（title case）就紅了，**擋下了整批資料更新**。
+    // 這是「測試守備力被資料分布稀釋」的又一例：斷言邏輯本來就錯，
+    // 只是當前資料碰不到。改為比對**實際渲染出去的那個字串**，與資料分布無關。
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    assert.ok($('qPrompt').innerHTML.includes(esc(q.item.full)),
+      `題幹應顯示英文品名 ${q.item.full}`);
   });
 });
 
