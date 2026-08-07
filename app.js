@@ -15,6 +15,7 @@ import {
   pickEliminated, replaceOption, drawSpareQuestion, validateQuizInvariants,
   DECK_SIZE, buildLookAlikeIndex, lookAlikesOf, flipCard, drawDeck, drawSpareCard,
   displayZh, longestStreak, currentStreak, rankTitle,
+  wrongAnsKeys, drawRetryQuiz,
 } from './engine.js';
 
 const SCHEMA = 1;
@@ -81,6 +82,22 @@ const state = {
    * `null` 代表 storage 不可用。
    */
   records: null,
+
+  // ── M5 錯題再戰的 session ownership（規格 D31）────────────────────
+  /** `'quiz' | 'retry'`。複習期間為 `'retry'` */
+  mode: 'quiz',
+  /**
+   * 進入複習前的原卷快照。**只存原始欄位**（D31 單一真相來源）——
+   * 分數、稱號、三級判定、最長連對、亂猜基線一律由這兩個欄位重算。
+   * 多存一份可重算的衍生值，就多一個會與重算結果分歧的來源。
+   *
+   * 生命週期：發布點通過時建立 → 複習期間唯讀 → 返回或中止時**清為 null**。
+   * **下一個正常回合開始時必須為 null**：不清的話，`renderResult()`
+   * 讀到殘留快照就會把上一回合的分數印進成績卡，而 C29 只涵蓋得到複習期間。
+   */
+  origin: null,
+  /** 建構中旗標。雙擊時第二次起為 no-op（D31 冪等） */
+  retryBuilding: false,
 
   // 閃卡（獨立於測驗的狀態，不共用 questions／idx——共用會讓
   // 「閃完一疊再去測驗」把閃卡殘留的索引帶進成績頁）
@@ -402,6 +419,15 @@ function startQuiz() {
     return;
   }
   const level = state.level;
+  // D31 生命週期：新的一輪正常回合開始前，retry 的殘留一律清乾淨。
+  //
+  // **這一行目前沒有測試守著**（變異驗證確認：拿掉它，25 條全綠）。
+  // 原因是現況到不了「origin 非 null 且走到 startQuiz」——`exitRetry()` 與
+  // `backToStart()` 都已經清過，而複習結算頁不提供「再測一回」。
+  // 留著是縱深防禦：D31 的生命週期表把「下一個正常回合開始時 origin 必為 null」
+  // 列為硬性條件，靠三處各自清乾淨來成立，少任何一處都會讓
+  // 「下一回合的成績卡印上一回合的分數」這條路徑重新打開。
+  clearRetryState();
 
   try {
     state.questions = drawLeveledQuiz(state.pool.items, {
@@ -456,6 +482,15 @@ const OPT_KEYS = ['A', 'B', 'C', 'D'];
  * 用 `setTimeout` 收尾的動畫會多一條與資訊呈現無關的排程（D27 條 2 的精神）。
  */
 function refreshStreak(upTo, pop = false) {
+  // 〔D29〕複習模式不顯示 live streak。D32 把更新時點掛在 lockAndReveal()，
+  // 而 retry 走的就是同一條——不在這裡擋，它會照跑。
+  // 錯題卷是刻意挑的難題子集，連對數與正常卷不可比（同 D26 三級分數不可比的理由），
+  // 顯示它等於給出一個會被當成能力訊號的數字
+  if (state.mode === 'retry') {
+    show($('qStreak'), false);
+    $('qStreak').classList.remove('pop');
+    return;
+  }
   const n = currentStreak(state.questions, upTo);
   $('qStreakN').textContent = n;
   show($('qStreak'), n >= 1);            // 0 沒有「連對」可言，顯示「連對 0」只是噪音
@@ -467,10 +502,15 @@ function renderQuestion() {
   const cfg = LEVELS[q.level ?? Level.L3];
 
   clearTimers();
+  // 分母是本卷題數而非 QUIZ_SIZE：複習卷通常只有數題，寫死 20 會讓
+  // 使用者看到「第 3 / 20 題」然後在第 3 題就結束（D33）
+  const total = state.questions.length;
   $('qIdx').textContent = state.idx + 1;
-  $('qBar').style.width = `${(state.idx / QUIZ_SIZE) * 100}%`;
+  $('qTotal').textContent = total;
+  $('qBar').style.width = `${(state.idx / total) * 100}%`;
   $('qScore').textContent = scoreQuiz(state.questions.slice(0, state.idx)).earned.toFixed(1);
   refreshStreak(state.idx);
+  show($('qRetryTag'), state.mode === 'retry');
 
   show($('qHint'), false);
   show($('qVerdict'), false);
@@ -694,6 +734,29 @@ function hintChoice() {
 
 /** 資源失敗：作廢並自題庫遞補一題（不計分、不計入分母） */
 function voidCurrent(reason) {
+  // ── 複習模式：整次複習終止，回到原成績（D28）──
+  // **嚴禁**走下面的遞補路徑：drawSpareQuestion 抽的是「未使用且 eligible」的
+  // **任意**鍵（F15），複習卷用它必然混入原本沒答錯的藥，而畫面上完全看不出來。
+  // 使用者會以為自己複習完了全部錯題。這是 M5 專屬的第一順位風險。
+  if (state.mode === 'retry') {
+    const origin = state.origin;
+    // 先清乾淨再走失敗路徑（覆審 M-9）。直接 fatal 會讓狀態停在
+    // `mode='retry'` 而 `origin=null`——那是**永久卡住**的組合：
+    // 之後每一次 voidCurrent 都會再 fatal 一次，且 startRetry 的冪等守衛
+    // 看到 mode='retry' 就永遠 no-op，使用者只能重整頁面
+    if (!origin) {
+      clearRetryState();
+      return fatal('複習狀態已遺失，無法回到原成績。');
+    }
+    state.questions = origin.questions;
+    state.quizLevel = origin.quizLevel;
+    state.idx = state.questions.length;
+    clearRetryState();
+    renderResult({ record: false });
+    retryFailed(`複習途中圖片載入失敗（${reason}）`);
+    return;
+  }
+
   const q = state.questions[state.idx];
   const next = transition(q, { type: 'fail' });
 
@@ -1068,12 +1131,50 @@ function quitFlash() {
 
 // ── 成績 ─────────────────────────────────────────────────────────────
 
+/**
+ * 一個回合真的完成。**只有這裡會寫紀錄**——
+ * 紀錄是「完成一個回合」的副作用，不是「顯示結算頁」的副作用。
+ * 返回原成績時重走 `renderResult()` 但不寫，否則每次返回都會重跑一次寫入判定。
+ */
 function finish() {
+  renderResult({ record: state.mode !== 'retry' });
+}
+
+/**
+ * 結算頁渲染。**正常回合、複習回合、返回原成績三者走的是同一條路徑**（D31）——
+ * 另寫一條「返回專用」的衍生路徑等於開第二套結算模型，
+ * 而兩套模型一定會漂移（漂移的後果是成績卡印的數字與畫面上不一樣）。
+ *
+ * 複習模式的差異全部集中在 `retry` 分支，由 D29 的正負面契約定義。
+ */
+function renderResult({ record }) {
+  const retry = state.mode === 'retry';
   const r = scoreQuiz(state.questions);
   const streak = longestStreak(state.questions);
   const cfg = LEVELS[state.quizLevel ?? Level.L3];
   show($('quiz'), false);
   show($('result'));
+
+  // ── D29：複習卷的分母不是 20、題目不是隨機抽樣，任何跨回合可比較的數字都不適用
+  $('resultTitle').textContent = retry ? '錯題複習結果' : '測驗結果';
+  show($('retryNote'), retry);
+  show($('resultMetrics'), !retry);      // 分數／基線／最長連對全在這裡面
+  show($('resultActions'), !retry);      // 含成績卡下載與「錯題再戰」
+  show($('retryActions'), retry);
+  if (retry) {
+    show($('resultRank'), false);        // 稱號：D24 的表以 (level, score) 為輸入
+    show($('recordFlash'), false);
+    show($('retryFail'), false);
+    $('resultBadge').textContent = cfg.badge;
+    // M 是**題數不是分數**：HINTED_MARK 讓提示後答對計 0.5，
+    // 沿用加權值會印出「5 題答對 3.5 題」這種讀不通的句子（D29）
+    const done = state.questions.filter((q) => q.state === QState.LOCKED).length;
+    const got = state.questions.filter((q) => q.state === QState.LOCKED && q.correct === true).length;
+    $('resultSub').textContent = `本次 ${done} 題答對 ${got} 題`;
+    renderReview(cfg.choice, { retry: true });
+    window.scrollTo(0, 0);               // 動畫一律走 CSS 正向表列（D27 條 5）
+    return;
+  }
 
   $('resultBadge').textContent = cfg.badge;
   $('resultSub').textContent =
@@ -1109,33 +1210,25 @@ function finish() {
   $('rankTitle').textContent = title;
   show($('resultRank'), !!title);
 
-  const isChoice = cfg.choice;
-  $('reviewHead').innerHTML = isChoice
-    ? '<th>#</th><th>正解</th><th>你選的</th><th>結果</th><th>得分</th>'
-    : '<th>#</th><th>正解</th><th>你的作答</th><th>得分</th>';
+  renderReview(cfg.choice, { retry: false });
 
-  $('reviewBody').innerHTML = state.questions.map((q, i) => {
-    const cols = isChoice ? 5 : 4;
-    if (q.state === QState.VOID) {
-      return `<tr><td>${i + 1}</td><td class="ans vd">—</td>`
-        + `<td class="vd" colspan="${cols - 3}">資源載入失敗</td><td class="mk vd">作廢</td></tr>`;
-    }
-    const got = q.correct ? '<span class="ok">答對</span>' : '<span class="no">答錯</span>';
-    const picked = isChoice
-      ? `<td class="ans">${escapeHtml(q.options?.[q.picked]?.ans ?? '—')}</td>`
-      : '';
-    return `<tr><td>${i + 1}</td><td class="ans">${escapeHtml(q.item.ans)}</td>${picked}`
-      + `<td>${got}${q.mark === HINTED_MARK ? '（提示）' : ''}</td>`
-      + `<td class="mk">${q.correct ? q.mark.toFixed(1) : '0.0'}</td></tr>`;
-  }).join('');
+  // 「錯題再戰」控制項：**錯題數 > 0 時才存在**（D33）。
+  // 用 hidden class 而非 disabled——零錯題時控制項不該可及，
+  // disabled 仍在 DOM 裡，程式化 click 照樣觸發得到
+  const wrong = wrongAnsKeys(state.questions);
+  $('btnRetryN').textContent = wrong.length;
+  show($('btnRetry'), wrong.length > 0);
+  show($('retryFail'), false);
 
   // 紀錄寫入放在**全部渲染之後**，並整段包在 try 內：
   // 持久化是附加功能，它的任何失敗都不得讓使用者拿不到分數與逐題檢討（§5.2）
   let fresh = [];
-  try {
-    fresh = writeRecords(state.quizLevel, r.score, streak.length)?.fresh ?? [];
-  } catch (e) {
-    console.warn('[records] 寫入失敗', e);
+  if (record) {
+    try {
+      fresh = writeRecords(state.quizLevel, r.score, streak.length)?.fresh ?? [];
+    } catch (e) {
+      console.warn('[records] 寫入失敗', e);
+    }
   }
   // 「新紀錄！」只在持久化確認完成後顯示——宣稱已保存而實際失敗，
   // 使用者要到下次開啟才會發現紀錄不見了（E3）
@@ -1147,9 +1240,214 @@ function finish() {
   window.scrollTo(0, 0);        // 同上（D27 條 5）
 }
 
+/**
+ * 逐題檢討。複習模式**不印每題得分**——D29 的負面契約是「不顯示分數」，
+ * 逐題得分就是分數，只是換一個位置。
+ */
+function renderReview(isChoice, { retry }) {
+  const scoreCol = !retry;
+  // 欄位結構與 v3 完全相同，複習模式只是**少一欄得分**。
+  // 非選擇題的「你的作答」欄放的就是答對／答錯（v3 既有行為，不在這輪改）
+  $('reviewHead').innerHTML = (isChoice
+    ? '<th>#</th><th>正解</th><th>你選的</th><th>結果</th>'
+    : '<th>#</th><th>正解</th><th>你的作答</th>')
+    + (scoreCol ? '<th>得分</th>' : '');
+
+  const cols = (isChoice ? 4 : 3) + (scoreCol ? 1 : 0);
+  $('reviewBody').innerHTML = state.questions.map((q, i) => {
+    if (q.state === QState.VOID) {
+      // 複習卷不會有作廢題（D28：圖片失敗整卷終止，不遞補），這條是防禦性的
+      // 欄數：#、正解、跨欄說明、（得分）。跨欄寬度隨得分欄的有無而變
+      return `<tr><td>${i + 1}</td><td class="ans vd">—</td>`
+        + `<td class="vd" colspan="${scoreCol ? cols - 3 : cols - 2}">`
+        + `資源載入失敗${scoreCol ? '' : '（作廢）'}</td>`
+        + (scoreCol ? '<td class="mk vd">作廢</td>' : '') + '</tr>';
+    }
+    const got = q.correct ? '<span class="ok">答對</span>' : '<span class="no">答錯</span>';
+    const picked = isChoice
+      ? `<td class="ans">${escapeHtml(q.options?.[q.picked]?.ans ?? '—')}</td>`
+      : '';
+    return `<tr><td>${i + 1}</td><td class="ans">${escapeHtml(q.item.ans)}</td>${picked}`
+      + `<td>${got}${q.mark === HINTED_MARK ? '（提示）' : ''}</td>`
+      + (scoreCol ? `<td class="mk">${q.correct ? q.mark.toFixed(1) : '0.0'}</td>` : '')
+      + '</tr>';
+  }).join('');
+}
+
+// ── M5 錯題再戰（規格 D28／D28.1／D29／D31／D33）─────────────────────
+
+/** 把 retry 的暫態清乾淨。三種失敗與返回共用同一條，避免各自漏掉一項 */
+function clearRetryState() {
+  clearTimers();
+  state.mode = 'quiz';
+  state.origin = null;
+  state.retryBuilding = false;
+}
+
+/**
+ * 建構失敗時的非破壞性提示（D28.1）。
+ *
+ * 規格原本寫「DOM 完全不變」——那是自相矛盾的：使用者按了按鈕卻什麼都沒發生，
+ * 與「功能靜默不存在」無法區分，而那是本專案第二順位風險。
+ * 約束因此精確化為「**原成績內容**不變」：這裡只寫一個獨立的提示元素，
+ * 不觸碰分數、稱號、三級判定、逐題檢討與任何按鈕的可用性。
+ */
+function retryFailed(msg) {
+  $('retryFail').textContent = `這次沒能組出複習卷：${msg}　原成績不受影響，可以再試一次。`;
+  show($('retryFail'));
+}
+
+/**
+ * L2 的資源前置條件：把候選卷**每一格**的圖片先載完（規格 D28.1、覆審 M-1）。
+ *
+ * 沒有這一步，L2 的複習卷會是「先發布再回滾」——切進答題頁之後才發現某張圖
+ * 載不動，於是 `voidCurrent()` 把整次複習終止並退回原成績。使用者看到的是
+ * 「按下去、畫面跳走、又跳回來」，而 D28.1 加上這條前置條件的目的正是消掉回滾。
+ *
+ * 節點刻意不掛進 DOM：這裡只要把資源送進瀏覽器快取並確認它可解碼，
+ * 真正的 `<img>` 稍後由 `renderGrid()` 建立（同一個 src 直接命中快取）。
+ * **這不取代 ready-gate**——快取仍可能在期間被逐出，`loadCell()` 的逾時與
+ * `failCell()` 因此保留。
+ *
+ * @returns {Promise<boolean>} 全部成功才是 true；任何一張失敗或逾時即 false
+ */
+function preloadGridImages(quiz) {
+  const srcs = [...new Set(quiz.flatMap((q) => q.options.map((o) => DATA_DIR + o.img)))];
+  const one = (src) => new Promise((resolve) => {
+    const img = document.createElement('img');
+    let settled = false;
+    const settle = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(ok);
+    };
+    // 逾時與 loadCell 同一個常數。永久 pending 的圖沒有逾時就會讓
+    // 「錯題再戰」按下去之後永遠沒有反應——比失敗提示更難理解
+    const timer = setTimeout(() => settle(false), L2_LOAD_TIMEOUT_MS);
+    img.onload = () => settle((img.naturalWidth ?? 1) > 0);   // 零尺寸視同失敗
+    img.onerror = () => settle(false);
+    img.src = src;
+  });
+  return Promise.all(srcs.map(one)).then((oks) => oks.every(Boolean));
+}
+
+/**
+ * **D28.1 的發布點本身**。呼叫到這裡代表三個前置條件都已成立：
+ * 候選卷完整建構、`validateQuizInvariants()` 回空、該級的資源前置條件成立。
+ *
+ * 抽成獨立函式不只是整理：L2 的發布發生在 Promise 回呼裡，
+ * 兩條入口共用同一段發布程式碼才能保證「L2 少做了一步」不會悄悄發生。
+ */
+function publishRetry(quiz) {
+  state.origin = {
+    // **只存原始欄位**（D31 單一真相來源）。分數、稱號、基線、最長連對
+    // 一律由這兩個欄位重算——多存一份可重算的值就多一個會分歧的來源
+    questions: state.questions,
+    quizLevel: state.quizLevel,
+  };
+  state.mode = 'retry';
+  state.retryBuilding = false;
+  state.questions = quiz;
+  state.idx = 0;
+  state.voided = 0;
+  state.nextToken = quiz.length + 1;
+  show($('result'), false);
+  show($('quiz'));
+  renderQuestion();
+}
+
+/**
+ * 進入錯題再戰。
+ *
+ * **D28.1 原子發布點**：候選卷完整建構、通過整卷驗證、**且該級的資源前置條件
+ * 成立**之前，`state.mode`、`state.origin` 與畫面一律不動。因此發布前的任何
+ * 失敗都是「還沒開始」而不是「回滾」——不需要第二套回滾狀態流程。
+ */
+function startRetry() {
+  // D31 冪等：建構中或已在複習中，第二次起一律 no-op。
+  // 雙擊是真實情境，而覆寫 origin 會讓返回時拿到複習卷的成績。
+  // L2 的建構含非同步預載，`retryBuilding` 因此要撐過整個等待期間
+  if (state.retryBuilding || state.mode === 'retry' || state.origin) return;
+
+  const ansKeys = wrongAnsKeys(state.questions);
+  if (!ansKeys.length) return;           // 零錯題：控制項本來就不存在，這是防禦性的
+
+  const level = state.quizLevel ?? Level.L3;
+  state.retryBuilding = true;
+  let quiz;
+  try {
+    quiz = drawRetryQuiz(state.pool.items, {
+      level,
+      ansKeys,
+      rng: Math.random,
+      index: state.index,
+      eligible: LEVELS[level].choice ? eligibleFor(level) : null,
+    });
+  } catch (e) {
+    state.retryBuilding = false;
+    // 一律不發布。不得「把該題剔除後繼續」——靜默剔除會讓使用者
+    // 以為自己已複習完全部錯題（D28）
+    if (e.code === 'INVARIANT_VIOLATED') {
+      console.warn('[retry] 不變量違規', e.violations);
+      return retryFailed(`題卷未通過不變量驗證（${escapeHtml(violationCodes(e.violations))}）`);
+    }
+    if (e.code === 'KEY_NOT_ELIGIBLE') return retryFailed('部分錯題在這個難度已無法出題');
+    if (e.code === 'QUIZ_ASSEMBLY_FAILED' || e.code === 'NO_DISTRACTORS') {
+      return retryFailed('這些藥名湊不出足夠的誘答');
+    }
+    return retryFailed(e.message);
+  }
+
+  // L2：ready-gate 是這一級的資源前置條件，必須在發布前就成立（D28.1）
+  if (LEVELS[level].grid) {
+    preloadGridImages(quiz).then((ok) => {
+      // 等待期間使用者可能已按「再測一回」或返回起始頁——那兩條都會
+      // `clearRetryState()`。此時發布等於把畫面搶回複習卷
+      if (!state.retryBuilding) return;
+      if (!ok) {
+        state.retryBuilding = false;
+        return retryFailed('複習卷的藥品圖片載入失敗');
+      }
+      publishRetry(quiz);
+    });
+    return;
+  }
+  publishRetry(quiz);
+}
+
+/**
+ * 返回原成績（D31）。
+ *
+ * 由 `state.origin` **重新衍生**，走的是與正常回合完全相同的 `renderResult()`；
+ * 不回填任何先前保存的 DOM 字串——那樣表面會過，底層原卷卻已被覆寫。
+ * 返回完成後 `origin` 清為 `null`：不清的話，下一個正常回合的結算會讀到殘留快照。
+ */
+function exitRetry() {
+  if (state.mode !== 'retry') return;    // 不在複習中：控制項本來就隱藏，這是防禦性的
+  // `mode='retry'` 卻沒有 origin 是不該存在的組合。**不能只是 no-op**——
+  // no-op 會讓它永久停在那裡，返回鍵從此按不動（覆審 M-9）。
+  // 清乾淨再明說失敗，使用者至少能重新開始
+  if (!state.origin) {
+    clearRetryState();
+    return fatal('複習狀態已遺失，無法回到原成績。');
+  }
+  const origin = state.origin;
+  state.questions = origin.questions;
+  state.quizLevel = origin.quizLevel;
+  state.idx = state.questions.length;
+  clearRetryState();                     // 先回到 quiz 模式，renderResult 才走正常分支
+  renderResult({ record: false });       // 紀錄是「完成回合」的副作用，不是「顯示」的
+}
+
 // ── 成績卡（純 Canvas，不含任何跨域圖片 — 規格 D7）───────────────────
 
 async function downloadCard() {
+  // D29：複習卷不出成績卡。按鈕在複習結算頁本來就隱藏，這是防禦性的第二道——
+  // 成績卡是唯一會外流的產物，不得帶著不可比的數字出去
+  if (state.mode === 'retry') {
+    throw new Error('錯題複習不提供成績卡（分母不是 20，數字不可比）');
+  }
   const r = scoreQuiz(state.questions);
   const cfg = LEVELS[state.quizLevel ?? Level.L3];
   const W = 720, H = 900, S = 2;             // 2× 供高解析螢幕
@@ -1282,6 +1580,7 @@ function escapeHtml(s) {
 // ── 綁定 ─────────────────────────────────────────────────────────────
 
 function backToStart() {
+  clearRetryState();            // D31：離開結算頁就不該再有 retry 殘留
   show($('result'), false);
   show($('quiz'), false);
   show($('flash'), false);
@@ -1298,6 +1597,8 @@ $('btnSubmit').addEventListener('click', submit);
 $('btnHint').addEventListener('click', hint);
 $('btnHintChoice').addEventListener('click', hintChoice);
 $('btnNext').addEventListener('click', next);
+$('btnRetry').addEventListener('click', startRetry);
+$('btnBackToOrigin').addEventListener('click', exitRetry);
 $('btnDownload').addEventListener('click', () => {
   downloadCard().catch((e) => {
     $('resultSub').innerHTML += ` <span style="color:var(--danger)">（成績卡產生失敗：${escapeHtml(e.message)}）</span>`;

@@ -212,11 +212,18 @@ export function installDom() {
   });
   canvas.toBlob = (cb) => cb({ size: 1 });
 
+  // `createElement('img')` 必須是 ImgEl，不能是普通 El——
+  // M5 的 L2 發布前預載（D28.1）建的是**未掛進 DOM** 的 img 節點，
+  // 若樁回傳不會 settle 的 El，預載的 Promise 永遠不 resolve，
+  // L2 的複習卷就再也發布不出來，而測試只會看到逾時
+  let created = 0;
   globalThis.document = {
     getElementById: get,
-    createElement: (tag) => (tag === 'a'
-      ? { click() {}, set href(v) {}, set download(v) {} }
-      : new El(`created-${tag}`, tag)),
+    createElement: (tag) => {
+      if (tag === 'a') return { click() {}, set href(v) {}, set download(v) {} };
+      if (tag === 'img') return new ImgEl(`created-img#${created++}`);
+      return new El(`created-${tag}`, tag);
+    },
     fonts: { ready: Promise.resolve() },
   };
   globalThis.window = { scrollTo() {} };

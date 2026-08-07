@@ -209,6 +209,15 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .rec-note { font-size: 0.72rem; color: var(--text-muted); margin: 0.5rem 0 0; }
 .rec-flash { font-size: 0.78rem; color: var(--accent); font-weight: 500; margin: 0.6rem 0 0; }
 
+/* 錯題再戰（規格 v4 D29／D33）。
+   刻意用 muted 而非 accent：複習不是成就，強調它會反過來讓「不計入紀錄」被略過 */
+.retry-tag {
+  color: var(--text-muted); font-size: 0.72rem;
+  border: 1px solid var(--border); border-radius: 999px; padding: 0.05rem 0.5rem;
+}
+.retry-note { font-size: 0.78rem; color: var(--text-muted); margin: 0.35rem 0 0; }
+.retry-fail { font-size: 0.78rem; color: var(--danger); margin: 0.8rem 0 0; }
+
 /* 作答 */
 .answer-row { display: flex; gap: 0.6rem; margin-top: 1.1rem; flex-wrap: wrap; }
 input[type=text] {
@@ -361,6 +370,8 @@ input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow:
   <section id="quiz" class="card hidden">
     <div class="progress-head">
       <span>第 <span class="n" id="qIdx">1</span> / <span id="qTotal">20</span> 題</span>
+      <!-- 錯題複習標示：使用者任何時候都必須看得出「這是複習，不計入紀錄」（D33） -->
+      <span class="retry-tag hidden" id="qRetryTag">錯題複習 · 不計入紀錄</span>
       <span class="streak hidden" id="qStreak">連對 <span class="n" id="qStreakN">0</span></span>
       <span>目前得分 <span class="n" id="qScore">0</span></span>
     </div>
@@ -405,7 +416,9 @@ input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow:
 
   <!-- 成績 -->
   <section id="result" class="card hidden">
-    <h2><span class="step-num">✓</span>測驗結果 <span class="badge" id="resultBadge"></span></h2>
+    <h2><span class="step-num">✓</span><span id="resultTitle">測驗結果</span> <span class="badge" id="resultBadge"></span></h2>
+    <!-- 錯題複習的模式標示（D29／D33）。與 resultSub 分開：這句話在複習模式必須存在 -->
+    <p class="retry-note hidden" id="retryNote">錯題複習（不計入紀錄）</p>
     <p class="hint" id="resultSub"></p>
     <div class="results" id="resultMetrics"></div>
 
@@ -425,9 +438,21 @@ input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow:
       </table>
     </div>
 
-    <div class="btn-row">
+    <!-- 建構失敗的非破壞性提示（D28.1）。不觸碰原成績內容——
+         但也不能什麼都不顯示：按了沒反應與「功能靜默不存在」無法區分 -->
+    <p class="retry-fail hidden" id="retryFail"></p>
+
+    <!-- 正常回合的動作。錯題再戰控制項只在錯題數 > 0 時**存在**（D33），
+         不是 disabled——不存在才不會被程式化觸發 -->
+    <div class="btn-row" id="resultActions">
       <button id="btnDownload">下載成績卡 PNG</button>
+      <button id="btnRetry" class="ghost hidden">錯題再戰（<span id="btnRetryN">0</span> 題）</button>
       <button id="btnAgain" class="ghost">再測一回</button>
+    </div>
+
+    <!-- 複習結算頁的動作。唯一的去處是原回合結算頁，不是起始頁（D31） -->
+    <div class="btn-row hidden" id="retryActions">
+      <button id="btnBackToOrigin">返回原成績</button>
     </div>
   </section>
 
