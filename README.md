@@ -76,7 +76,7 @@ Q4 與 Q5 是刻意的：只憑「圓形／白色／無刻痕」無法唯一辨�
 （見 `tests/fetch_images_probe.py`）。缺 uv 時該組**直接失敗而不是跳過**。
 
 ```bash
-npm test                 # engine、難度分級、閃卡、UI 接線、娛樂性強化、資料管線與 SW 界線（306 項）
+npm test                 # engine、難度分級、閃卡、UI 接線、娛樂性強化、錯題再戰、資料管線與 SW 界線（363 項）
 npm run build:pool       # 抓取來源 → data/pool.json
 npm run fetch:images     # 鏡像圖片 → data/img/*.webp（需 uv）
 npm run verify           # 資料完整性驗證

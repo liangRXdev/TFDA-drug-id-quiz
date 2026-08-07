@@ -31,8 +31,11 @@ function loadSw() {
     put: async (req, res) => store.set(typeof req === 'string' ? req : req.url, res),
     match: async (req) => store.get(typeof req === 'string' ? req : req.url),
   };
+  const opened = [];
   const caches = {
-    open: async () => cache,
+    // 〔v4.5 C31〕記錄實際被開啟的 cache 名稱：
+    // 只比對原始碼裡的常數字串，新增一個沒被用作 cache 名稱的常數即可騙過
+    open: async (name) => { opened.push(name); return cache; },
     keys: async () => ['tfda-drug-id-quiz-v1'],
     delete: async () => true,
     match: async (req) => cache.match(req),
@@ -54,7 +57,7 @@ function loadSw() {
   new Function('self', 'caches', 'fetch', 'URL', 'Error', src)(
     self, caches, fetchStub, URL, Error,
   );
-  return { listeners, store, fetched, caches };
+  return { listeners, store, fetched, caches, opened };
 }
 
 /** 驅動 fetch handler，回報 respondWith 是否被呼叫 */
@@ -102,6 +105,23 @@ describe('SW 快取界線：題庫與圖片永不進快取', () => {
     assert.equal(responded, false, 'SW 不得對藥品圖片呼叫 respondWith');
   });
 
+  test('〔v4.5 C31〕`data/` 是**命名空間**而不是白名單', async () => {
+    // 〔堵〕只驗 pool.json 與一張既有圖片，證明不了整個 data/ 都不被攔截——
+    //       未來新增 data/*.json 會被錯誤攔截，而那正是「新題庫配舊資料」的入口
+    const { listeners } = loadSw();
+    for (const p of [
+      'data/pool.json',
+      'data/img/9628e7c4ecd079c2.webp',
+      'data/img/nested/deeper/x.webp',        // 巢狀路徑
+      'data/pool.json?v=20260807',            // 帶 query string
+      'data/does-not-exist-yet.json',         // 尚不存在的檔名
+      'data/',                                // 目錄本身
+    ]) {
+      const { responded } = await handleFetch(listeners, `${ORIGIN}/${p}`);
+      assert.equal(responded, false, `SW 攔截了 ${p} —— data/ 界線必須是命名空間`);
+    }
+  });
+
   test('shell 資源走網路優先，成功時才寫回快取', async () => {
     const { listeners, fetched } = loadSw();
     const { responded } = await handleFetch(listeners, `${ORIGIN}/app.js`);
@@ -131,7 +151,17 @@ describe('C31 每批交付無條件升 CACHE 版本', () => {
     //       「這批沒新增資源所以不用升」的判斷不留給下一個人
     const m = /const CACHE = '([^']+)'/.exec(src);
     assert.ok(m, 'sw.js 必須有 const CACHE');
-    assert.equal(m[1], 'tfda-drug-id-quiz-v3', '本批（批次 A 覆審修正）必須升到 v3');
+    assert.equal(m[1], 'tfda-drug-id-quiz-v4', '本批（批次 B／M5 錯題再戰）必須升到 v4');
+  });
+
+  test('〔v4.5〕cache 名稱由 install 實際使用的值取證，不只比對原始碼常數', async () => {
+    // 〔堵〕新增一個沒被用作 cache 名稱的常數，就能讓「原始碼裡的字串已變」通過
+    const { listeners, opened } = loadSw();
+    let done;
+    listeners.install({ waitUntil: (p) => { done = p; } });
+    await done;
+    assert.deepEqual(opened, ['tfda-drug-id-quiz-v4'],
+      `install 實際開啟的 cache 名稱是 ${JSON.stringify(opened)}`);
   });
 
   test('shell 清單的每個資源都真的存在', async () => {
