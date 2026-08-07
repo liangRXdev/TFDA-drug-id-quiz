@@ -113,7 +113,9 @@ key 是 `tfda-drug-id-quiz:records`。**前綴不可省**——本站與 pharmac
 ## 指令
 
 ```bash
-npm test                 # engine + 難度分級 + 閃卡 + UI 接線 + 娛樂性強化 + SW 界線（272 項）；需 Node ≥22（glob）
+npm test                 # engine + 難度分級 + 閃卡 + UI 接線 + 娛樂性強化 + 資料管線 + SW 界線（306 項）
+                         # 需 Node ≥22（glob）**與 uv**：有一組驗收要真的用 Pillow 解碼損毀的 WebP，
+                         # 只有 Python 端做得到（tests/fetch_images_probe.py）。缺 uv 直接紅，不 skip
 npm run build:pool       # 抓來源 → 產 data/pool.json
 npm run fetch:images     # 鏡像圖片（uv + Pillow）
 npm run verify           # 資料完整性（B 組）

@@ -66,5 +66,49 @@ Codex 出現 **1 次事實錯誤**（TG-7 子主張 a），其餘引用的檔案
 
 ## 邊界聲明
 
-本輪全程唯讀，**未修改任何 source code**。唯一的寫入是 `.ai-review/` 下的兩份報告
+覆審輪全程唯讀，**未修改任何 source code**。唯一的寫入是 `.ai-review/` 下的兩份報告
 （`codex-review-v4b.md` 原始意見、本判定檔）。修不修、怎麼修由使用者決定。
+
+---
+
+## 處理結果（2026-08-07）
+
+上表 13 項全部處理完畢。**每一項都以變異驗證確認會轉紅**——沒轉紅的測試等於沒測。
+
+| # | 處理 | 變異驗證 |
+|---|------|---------|
+| **SC-2** | 裁示：PR #3 維持純程式碼，**合併後手動觸發 `update-pool` workflow**，由正式管線產出 `pool.json` 並自動推回 `main`。理由：資料更新與程式碼修正的歸因分離（當初不重建的理由）**同時**功能真的送達，且順帶端對端實跑驗證 SC-3／CR-4 的增量判定。`verdict-v4a.md` 的 SC-2 證據欄已收斂措辭並加後記 | 見 TG-1 |
+| **TG-1** | `tests/pipeline.test.mjs` 新增端到端：用 `Buffer` 手組最小 stored-entry ZIP（含不符 schema 的誘餌、且誘餌日期不同），實跑 `build-pool.mjs` 到暫存輸出，斷言 `meta.source_version` 真的存在 | `pickDataFile` 漏回傳 `mtime`／payload 漏寫欄位／無合法日期仍無條件寫入 → **各紅 1** |
+| **TG-5** | `remSizes()` 取代 `remOf()`：**解析不出來的字級宣告一律 fail**，不再回 `null` 被呼叫端濾掉 | `.rank-title { font-size: 48px }` → **52/1** |
+| **TG-6** | `matchesSel()` 除完全相等外，納入「以目標 selector 為結尾」的較高 specificity 規則；結尾前一字元須為組合子，避免 `.foo-rank-title` 誤判 | `body .rank-title{3rem;accent}` → **51/2**；`body .streak.pop .n{2rem}` → **52/1**；`.foo-rank-title{9rem;danger}` → **53/0（正確不誤判）** |
+| **CR-2** | `dosDateToISO()` 加 `Date.UTC` round-trip，擋 `2026-02-31`／`2026-04-31`／非閏年 `2025-02-29`；合法閏日仍通過 | 移除 round-trip → **紅 1** |
+| **CR-3** | 新增 `isSha256()`／`is_sha256()`，`^[0-9a-f]{64}$` **三處共用**（`carryHashes`、`needs_fetch`、`verify-data`）。另加跨語言一致性契約，兩邊 regex 不同即紅 | `isSha256` 退回 truthy → **紅 2**；Python 兩處各退回 truthy → **各紅 1** |
+| **CR-4** | 修 `plan.md` **D10 文字**（非程式碼）：一般模式＝新增／URL 變更／缺檔／雜湊缺漏或格式不合法；`--verify-all`＝原地換圖與既有資產損毀 | 探針明列此邊界為一個案例 |
+| **TG-7** | 修 `plan-v4-engagement.md` **D27 條 5 文字**（非程式碼）：改為明列自動強制的 API 清單，並誠實寫明計時器驅動的 style 變更由人工留檔把關 | — |
+| **TG-2** | 抽出 `needs_fetch()`（原本內嵌在 `main()` 的 list comprehension，完全測不到）；新增 `tests/fetch_images_probe.py` + `tests/fetch-images.test.mjs` | predicate 反寫／拿掉缺檔判斷／退回 truthy／早退不理會 `--verify-all`／`--verify-all` 不解碼 → **各紅** |
+| **TG-3** | 探針用「容器結構合法但位元流損毀」的暫存 WebP 實跑 `verify_asset()`（截尾後回寫 RIFF 與 chunk 長度使其自洽，因此 `verify-data.mjs` 的 header 檢查會放行——這正好把 CR-2 的分工邊界變成可執行的證據） | `im.load()` 改 `pass`（等同 `if False:`）／整段包 `except: return` → **各紅** |
+| **TG-4** | 子行程實跑：`import` 不觸發 `main()`（並驗具名匯出真的拿得到）；四種 `argv[1]` 形式直接執行都必須進 `main()` | guard 恆真 → **紅 1**；guard 恆假 → **紅 4**。〔附帶實證〕跑「guard 恆真」那個變異時，測試一 `import` 就真的去下載了 TFDA 來源並**覆寫 `data/pool.json`**（已 `git checkout` 還原）——這道 guard 防的正是這件事，不是理論風險 |
+| **TG-8** | C26 同 tick 契約擴到 **L2 圖片格與 L3 輸入**，共用 `sameTick()` 與 `assertRevealed()` | L2 改 rAF 延後 → L1／L2 兩條同時紅；L3 改 microtask 延後 → **L3 那條紅** |
+| **CR-1** | 容量檢查移到 `POOL.write_text()` **之前**（原本非零退出宣稱不發布，`pool.json` 卻已改掉，下一輪基線是從未通過驗收的版本）。staging 目錄重構仍屬獨立一輪 | 把檢查搬回原位 → 探針 **紅** |
+
+**測試數 290 → 306**（新增 `tests/fetch-images.test.mjs` 3 條、`pipeline.test.mjs` 14 → 25、
+`engagement-ui.test.mjs` +2；其中 `fetch-images.test.mjs` 這 3 條背後是 Python 探針的 15 項斷言）。
+`node tools/verify-data.mjs` 全通過。
+
+**新增檔案**：`tests/fetch_images_probe.py`（Python 行為探針）、
+`tests/fetch_images_probe.py.lock`（與 `tools/fetch-images.py.lock` 鎖到同一組版本，
+有測試強制兩者一致）、`tests/fetch-images.test.mjs`（把探針接進 `npm test`）。
+**`npm test` 從此需要 uv**——與 `npm run fetch:images` 同一個前提，CI 由 `setup-uv` 提供；
+缺 uv 時**直接 fail 而不是 skip**（靜默跳過的測試和「功能靜默不存在」是同一件事）。
+
+### 合併後必做（SC-2 的送達步驟，缺這步等於沒修）
+
+1. merge PR #3 到 `main`。
+2. 到 Actions → **更新題庫** → `Run workflow`（`allow_any_delta` 與 `verify_all` 都**不勾**）。
+3. 確認 job 綠燈且產生 `chore(data): 更新題庫至 N 題` 的自動 commit。
+   預期 `N ≈ 3,924`（+11 筆、幅度 0.28%，遠低於 ±3% 門檻）。
+4. **驗證送達**：
+   - `node -e "console.log(require('./data/pool.json').meta.source_version)"` → 應為 `YYYY-MM-DD`
+   - 線上開起始頁，確認 C6 的資料版本**真的顯示出來**
+5. 若 workflow 失敗：`data/` 不變（D9 全有全無），依自動開的 issue 處置後重跑。
+   **在第 4 步通過之前，SC-2 不算關閉。**
