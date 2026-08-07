@@ -654,13 +654,12 @@ describe('C24 成績卡未退化且不含稱號', () => {
 describe('C26 揭曉不得被延後（DOM 部分）', () => {
   before(needPool);
 
-  test('lockAndReveal 返回的同一 tick 內資訊已到位且可操作', () => {
-    store.reset();
-    $('btnAgain').click();
-    const expected = startLevel(Level.L1, 9001);
-    const ai = expected[0].answerIdx;
-
-    // 〔堵〕改用 microtask 或 rAF 延後，即可繞過只堵 setTimeout 的斷言
+  /**
+   * 在同一 tick 內執行 `act()`，回傳期間被排入的延後執行次數。
+   *
+   * 〔堵〕改用 microtask 或 rAF 延後，即可繞過只堵 setTimeout 的斷言
+   */
+  function sameTick(act) {
     const orig = {
       st: globalThis.setTimeout,
       qm: globalThis.queueMicrotask,
@@ -670,24 +669,68 @@ describe('C26 揭曉不得被延後（DOM 部分）', () => {
     globalThis.setTimeout = (...a) => { scheduled++; return orig.st(...a); };
     globalThis.queueMicrotask = (f) => { scheduled++; return orig.qm(f); };
     globalThis.requestAnimationFrame = () => { scheduled++; return 0; };
-    try {
-      const opts = $('qOptions').querySelectorAll('.opt');
-      opts[ai].click();
-      // 不 await、不讓出：以下全部必須已是最終狀態
-      assert.ok(!hidden('qVerdict'), '判定未在同一 tick 顯示');
-      assert.match($('qVerdict').innerHTML, /答對/);
-      // 品名含 " 與 '，DOM 內是 HTML 實體——比對前要走同一套轉義
-      const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
-        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-      assert.ok($('qVerdict').innerHTML.includes(esc(expected[0].item.full)), '正解未在同一 tick 顯示');
-      assert.ok(opts[ai].classList.contains('ok'), '正解格標記未在同一 tick 標上');
-      assert.ok(!hidden('btnNext'), '下一題按鈕未在同一 tick 顯示');
-      assert.equal($('btnNext').disabled, false, '下一題按鈕仍是 disabled');
-      assert.equal(scheduled, 0, '揭曉路徑排入了延後執行的排程');
-    } finally {
+    try { act(); } finally {
       globalThis.setTimeout = orig.st;
       globalThis.queueMicrotask = orig.qm;
       globalThis.requestAnimationFrame = orig.raf;
     }
+    return scheduled;
+  }
+
+  // 品名含 " 與 '，DOM 內是 HTML 實體——比對前要走同一套轉義
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  /** 不 await、不讓出：呼叫時以下全部必須已是最終狀態 */
+  function assertRevealed(q, okEl, label) {
+    assert.ok(!hidden('qVerdict'), `${label}：判定未在同一 tick 顯示`);
+    assert.match($('qVerdict').innerHTML, /答對/, `${label}：判定內容不是答對`);
+    assert.ok($('qVerdict').innerHTML.includes(esc(q.item.full)), `${label}：正解未在同一 tick 顯示`);
+    if (okEl) assert.ok(okEl.classList.contains('ok'), `${label}：正解格標記未在同一 tick 標上`);
+    assert.ok(!hidden('btnNext'), `${label}：下一題按鈕未在同一 tick 顯示`);
+    assert.equal($('btnNext').disabled, false, `${label}：下一題按鈕仍是 disabled`);
+  }
+
+  // 〔TG-8〕原本只走 L1 的選項路徑。三級目前共用 lockAndReveal()，所以現況無缺陷——
+  //         但呼叫端只要加一個 level 分支就能把 L2／L3 改成延後揭曉，而 L1 測試仍全綠。
+  //         「現在剛好共用」不是契約，共用會不會維持下去才是要釘住的東西
+  test('L1 選項：lockAndReveal 返回的同一 tick 內資訊已到位且可操作', () => {
+    store.reset();
+    $('btnAgain').click();
+    const expected = startLevel(Level.L1, 9001);
+    const opts = $('qOptions').querySelectorAll('.opt');
+    const ai = expected[0].answerIdx;
+    const scheduled = sameTick(() => {
+      opts[ai].click();
+      assertRevealed(expected[0], opts[ai], 'L1');
+    });
+    assert.equal(scheduled, 0, 'L1 揭曉路徑排入了延後執行的排程');
+  });
+
+  test('L2 圖片格：同一 tick 內資訊已到位且可操作', async () => {
+    store.reset();
+    $('btnAgain').click();
+    dom.img.reset();
+    const expected = startLevel(Level.L2, 9002);
+    await dom.settle();          // ready-gate 是 L2 的既有機制，讓它先放行再開始計數
+    const cells = dom.cells();
+    const ai = expected[0].answerIdx;
+    const scheduled = sameTick(() => {
+      cells[ai].click();
+      assertRevealed(expected[0], cells[ai], 'L2');
+    });
+    assert.equal(scheduled, 0, 'L2 揭曉路徑排入了延後執行的排程');
+  });
+
+  test('L3 輸入作答：同一 tick 內資訊已到位且可操作', () => {
+    store.reset();
+    $('btnAgain').click();
+    const expected = startLevel(Level.L3, 9003);
+    const scheduled = sameTick(() => {
+      $('qInput').value = expected[0].item.ans;
+      $('btnSubmit').click();
+      assertRevealed(expected[0], null, 'L3');   // L3 沒有正解格，只驗判定與下一題
+    });
+    assert.equal(scheduled, 0, 'L3 揭曉路徑排入了延後執行的排程');
   });
 });

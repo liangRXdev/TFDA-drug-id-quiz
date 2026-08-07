@@ -363,22 +363,51 @@ const rulesOf = (css) => [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
 const propsOf = (body) => [...body.matchAll(/([a-z-]+)\s*:/g)].map((m) => m[1]);
 
 /**
- * 全檔（含 `@media` 內）收集 selector 命中的**所有**規則。
+ * selector 命中判定：完全相等，**或以該 selector 為結尾**。
+ *
+ * 〔TG-6〕後半是本輪補的。原本只比對完全相等，於是
+ * `body .rank-title { font-size: 3rem }` 這種較高 specificity 的覆寫整條掃不到——
+ * 在 cascade 上它會贏，契約卻宣告全綠。
+ * 結尾的前一個字元必須是組合子，否則 `.foo-rank-title` 會被誤判為命中。
+ */
+const matchesSel = (sel, target) => sel === target
+  || (sel.endsWith(target) && /[\s>+~]/.test(sel[sel.length - target.length - 1]));
+
+/**
+ * 全檔（含 `@media` 內）收集命中的**所有**規則。
  * 〔TG-2／TG-3〕原本用 `rulesOf(CSS).find(...)` 只驗第一條宣告，
  * 而 `index.html` 已存在 `@media (max-width: 480px)` 且該 block 內本來就在覆寫
  * `font-size`——在那裡多加一條覆寫是這個檔案的既有編輯習慣，會自然踩到這個洞。
  */
-const rulesMatching = (re) => rulesOf(CSS)
-  .filter((r) => r.sel.split(',').some((s) => re.test(s.trim())));
+const rulesMatching = (...targets) => rulesOf(CSS).filter((r) =>
+  r.sel.split(',').map((s) => s.trim().replace(/\s+/g, ' '))
+    .some((s) => targets.some((t) => matchesSel(s, t))));
 
 /** 取出所有 `color:` 宣告（排除 border-color／background-color 這類複合屬性） */
 const colorsOf = (body) => [...body.matchAll(/(?:^|[;{\s])color\s*:\s*([^;]+)/g)]
   .map((m) => m[1].trim());
 
-/** 單位一律換算成 rem 比較（本專案的字級全用 rem） */
-function remOf(body, prop = 'font-size') {
-  const m = new RegExp(`${prop}\\s*:\\s*([\\d.]+)rem`).exec(body);
-  return m ? Number(m[1]) : null;
+/**
+ * 取出這批規則所有 `prop` 宣告並換算成 rem。
+ *
+ * 〔TG-5〕**解析不出來的宣告一律 fail，不得靜默忽略**。
+ * 前一版回 `null` 再由呼叫端 `.filter(v !== null)` 濾掉，於是
+ * `.rank-title { font-size: 48px }` 直接消失，剩下的既有 rem 宣告讓契約照樣全綠。
+ * 把掃描範圍從「第一條」擴大到「全檔」卻沒同步處理「解析失敗怎麼辦」，
+ * 等於門開大了但鎖沒換。本專案字級一律用 rem，換單位就該回來改契約。
+ */
+function remSizes(rules, prop = 'font-size') {
+  const out = [];
+  for (const r of rules) {
+    const m = new RegExp(`(?:^|[;\\s])${prop}\\s*:\\s*([^;]+)`).exec(r.body);
+    if (!m) continue;
+    const raw = m[1].trim();
+    const num = /^([\d.]+)rem$/.exec(raw);
+    assert.ok(num, `${r.sel} 的 ${prop} 宣告為「${raw}」——`
+      + '本專案字級一律用 rem，無法換算的宣告不得被靜默忽略（TG-5）');
+    out.push(Number(num[1]));
+  }
+  return out;
 }
 
 describe('C23b 稱號的視覺層級（靜態契約）', () => {
@@ -386,8 +415,10 @@ describe('C23b 稱號的視覺層級（靜態契約）', () => {
     // 〔堵〕F13——樁上沒有 cascade，寫 getComputedStyle 必然假綠。
     //       這裡只驗宣告值，**實際渲染字級與對比另做人工瀏覽器留檔**
     // 〔TG-2〕改掃全檔：只取第一條的話，480px block 內加一條放大覆寫就溜過去了
-    const rankSizes = rulesMatching(/^\.rank-title$/).map((r) => remOf(r.body)).filter((v) => v !== null);
-    const interpSizes = rulesMatching(/^\.metric \.interp$/).map((r) => remOf(r.body)).filter((v) => v !== null);
+    // 〔TG-5／TG-6〕非 rem 宣告會在 remSizes() 內直接 fail；
+    //               `body .rank-title` 這類覆寫由 matchesSel() 的結尾比對納入
+    const rankSizes = remSizes(rulesMatching('.rank-title'));
+    const interpSizes = remSizes(rulesMatching('.metric .interp'));
     assert.ok(rankSizes.length, '.rank-title 必須明確宣告 font-size');
     assert.ok(interpSizes.length, '.metric .interp 必須明確宣告 font-size');
     // 保守契約：**任一處**的稱號字級都不得超過**任一處**的三級判定字級。
@@ -400,7 +431,7 @@ describe('C23b 稱號的視覺層級（靜態契約）', () => {
   });
 
   test('稱號用 muted 色，不得用 accent／danger 這類強調色（全檔）', () => {
-    const rules = rulesMatching(/^\.rank-title$/);
+    const rules = rulesMatching('.rank-title');
     const colors = rules.flatMap((r) => colorsOf(r.body));
     assert.ok(colors.length, '.rank-title 必須明確宣告 color');
     for (const c of colors) {
@@ -498,7 +529,7 @@ describe('C27 動畫不得造成 document flow 位移（靜態契約）', () => 
     //         把 `.streak.pop .n { font-size: 2rem }` 寫在 block 外，
     //         C27 不掃（不在 block 內）、C25 也不掃（不是 transition／animation）。
     //         狀態 selector 只該換顏色，佔位屬性一律歸基底規則管
-    const STATE = /^\.streak\.pop \.n$|^\.opt\.(ok|no)$|^\.cell\.(ok|no)$/;
+    const STATE = ['.streak.pop .n', '.opt.ok', '.opt.no', '.cell.ok', '.cell.no'];
     const FLOW_PROPS = new Set([
       'width', 'height', 'min-width', 'min-height', 'max-width', 'max-height',
       'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
@@ -509,7 +540,7 @@ describe('C27 動畫不得造成 document flow 位移（靜態契約）', () => 
       'display', 'position', 'top', 'right', 'bottom', 'left', 'inset',
       'gap', 'flex', 'flex-basis', 'grid-template-columns', 'writing-mode', 'zoom',
     ]);
-    const hit = rulesMatching(STATE);
+    const hit = rulesMatching(...STATE);
     assert.ok(hit.length >= 5, `狀態 selector 應全部存在，實得 ${hit.length} 條`);
     for (const r of hit) {
       const bad = propsOf(r.body).filter((p) => FLOW_PROPS.has(p));
