@@ -16,6 +16,7 @@ import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { normalize, squash, editDistance, FUZZY_MIN_LEN } from '../engine.js';
+import { PREFIX_TABLE } from '../formulary.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SOURCE_URL = 'https://data.fda.gov.tw/data/opendata/export/42/json';
@@ -186,17 +187,46 @@ const assetKey = (id) => crypto.createHash('sha1').update(id, 'utf8').digest('he
 function buildPool(rows) {
   const stages = { 來源: rows.length };
 
-  let cur = rows.filter((r) => splitMulti(r['形狀']).some((s) => SOLID_SHAPES.has(s)));
+  /**
+   * id → **首次**淘汰階段（規格 §5.1／D37 的 stage precedence，固定 Q1→Q5）。
+   *
+   * 同一 id 多列時：**任一列存活即算 matched**（見 main() 末段的扣除），
+   * 全數淘汰才取最早失敗階段。`if (!has)` 配合階段的處理順序即實現「最早」，
+   * 且同階段內的列彼此同 stage，因此**結果不依來源列順序改變**。
+   *
+   * 實測 2026-08-10 的來源 6295 列 id 全部唯一，此規則目前不會被觸發；
+   * 仍實作出來，未來資料變動時行為才是確定的而不是碰運氣。
+   */
+  const excludedBy = new Map();
+  const markOut = (rs, stage) => {
+    for (const r of rs) {
+      const id = String((r.r ?? r)['許可證字號'] ?? '').trim();
+      if (id && !excludedBy.has(id)) excludedBy.set(id, stage);
+    }
+  };
+  /** 一次走訪切成 [通過, 淘汰]，避免跑兩次 predicate */
+  const partition = (arr, pred) => {
+    const pass = [], drop = [];
+    for (const x of arr) (pred(x) ? pass : drop).push(x);
+    return [pass, drop];
+  };
+
+  let cur, out;
+  [cur, out] = partition(rows, (r) => splitMulti(r['形狀']).some((s) => SOLID_SHAPES.has(s)));
+  markOut(out, 'Q1');
   stages['Q1 固體口服'] = cur.length;
 
-  cur = cur.filter((r) => String(r['外觀圖檔連結'] ?? '').trim());
+  [cur, out] = partition(cur, (r) => String(r['外觀圖檔連結'] ?? '').trim());
+  markOut(out, 'Q2');
   stages['Q2 有圖檔'] = cur.length;
 
   const withKey = cur.map((r) => ({ r, ans: normalize(r['英文品名']) }));
-  cur = withKey.filter((x) => squash(x.ans).length >= 3);
+  [cur, out] = partition(withKey, (x) => squash(x.ans).length >= 3);
+  markOut(out, 'Q3');
   stages['Q3 答案鍵 ≥3'] = cur.length;
 
-  cur = cur.filter((x) => String(x.r['標註一'] ?? '').trim());
+  [cur, out] = partition(cur, (x) => String(x.r['標註一'] ?? '').trim());
+  markOut(out, 'Q4');
   stages['Q4 有刻字'] = cur.length;
 
   // Q5：外觀判別特徵衝突則整組排除（規格 D4）
@@ -212,7 +242,11 @@ function buildPool(rows) {
   let ambiguousGroups = 0;
   const kept = [];
   for (const members of groups.values()) {
-    if (new Set(members.map((m) => m.ans)).size > 1) { ambiguousGroups++; continue; }
+    if (new Set(members.map((m) => m.ans)).size > 1) {
+      ambiguousGroups++;
+      markOut(members, 'Q5');
+      continue;
+    }
     kept.push(...members);
   }
   stages['Q5 外觀可區分'] = kept.length;
@@ -233,7 +267,47 @@ function buildPool(rows) {
     mark2: String(r['標註二'] ?? '').trim() || null,
   }));
 
-  return { items, stages, ambiguousGroups };
+  // §5.1 的聚合規則：任一列存活 → 該 id 算 matched，不得同時出現在 excluded
+  for (const it of items) excludedBy.delete(it.id);
+
+  return { items, stages, ambiguousGroups, excludedBy };
+}
+
+/** D34.4 的 18 種前綴（`…字第` ＋ 號碼段的非數字前置部分） */
+const KNOWN_PREFIXES = new Set(PREFIX_TABLE.map((e) => e.prefix));
+
+/**
+ * B13 前綴表完整性 —— **掃來源全部列，不是掃存活品項**。
+ *
+ * 規格 v5.1 的前綴表只有 11 種，正是因為從 `pool.json` 的存活品項導出；
+ * 來源實際有 18 種（含兩種字母變體）。**存活品項的前綴分布是來源的真子集**，
+ * 從它導出必然漏。
+ *
+ * 前綴抽取刻意用**寬鬆**的正規式而非 `normalizeLicense()`：後者遇到未知前綴會回
+ * `null`，未知前綴就會被自己丟掉而永遠掃不到——**驗證器不能用被驗證的那套規則**。
+ *
+ * 遇到未知前綴一律**中止**而非警告：新前綴代表 wire contract 需要升版，
+ * 那是人必須介入的決策（升 `prefixTableVer`、在表尾追加 index、確認舊連結相容）。
+ * 月更因此中斷是可接受的代價——沿用「發布是全有全無」的既有紀律。
+ */
+function checkPrefixTable(rows) {
+  const unknown = new Map();
+  for (const r of rows) {
+    const id = String(r['許可證字號'] ?? '').trim();
+    const m = /^(.+?字第\D*)\d/.exec(id);
+    const p = m ? m[1] : `(無法解析：${id})`;
+    if (!KNOWN_PREFIXES.has(p)) unknown.set(p, (unknown.get(p) ?? 0) + 1);
+  }
+  if (unknown.size) {
+    const detail = [...unknown.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([p, n]) => `${p} × ${n} 筆`)
+      .join('；');
+    die(`來源含 ${unknown.size} 種不在 D34.4 前綴表中的前綴：${detail}。\n` +
+        '  這代表連結編碼的 wire contract 需要升版（升 prefixTableVer 並在表尾追加 index，\n' +
+        '  絕不可重排既有 index）。請人工確認後再發布。');
+  }
+  return KNOWN_PREFIXES.size;
 }
 
 /**
@@ -272,10 +346,10 @@ async function main() {
   const allowAnyDelta = argv.includes('--allow-any-delta');
 
   const buf = await fetchSource(arg('--source'));
-  console.log(`[2/8] 取得 ${buf.length.toLocaleString()} bytes，驗證 ZIP 結構`);
+  console.log(`[2/9] 取得 ${buf.length.toLocaleString()} bytes，驗證 ZIP 結構`);
   const entries = readZipEntries(buf);
 
-  console.log(`[3/8] ZIP 內 ${entries.length} 個檔案，依 schema 辨識資料檔`);
+  console.log(`[3/9] ZIP 內 ${entries.length} 個檔案，依 schema 辨識資料檔`);
   const { name, rows, mtime } = pickDataFile(entries);
   console.log(`      → ${name}（${rows.length.toLocaleString()} 筆）　資料版本 ${mtime ?? '(ZIP 無合法日期)'}`);
 
@@ -283,16 +357,20 @@ async function main() {
   const missing = REQUIRED_FIELDS.filter((f) => !(f in rows[0]));
   if (missing.length) die(`來源缺欄位：${missing.join(', ')}`);
 
-  console.log('[4/8] 套用資格條件 Q1–Q5');
-  const { items, stages, ambiguousGroups } = buildPool(rows);
+  console.log('[4/9] 驗證前綴表完整性（B13）');
+  const nPrefix = checkPrefixTable(rows);
+  console.log(`      來源全部 ${rows.length.toLocaleString()} 列的前綴皆在 D34.4 的 ${nPrefix} 種表內 ✓`);
+
+  console.log('[5/9] 套用資格條件 Q1–Q5');
+  const { items, stages, ambiguousGroups, excludedBy } = buildPool(rows);
   for (const [k, v] of Object.entries(stages)) console.log(`      ${k.padEnd(16)} ${v.toLocaleString()}`);
   console.log(`      （Q5 排除 ${ambiguousGroups} 個外觀不可區分群組）`);
 
-  console.log('[5/8] 計算容錯停用清單');
+  console.log('[6/9] 計算容錯停用清單');
   const noFuzzy = computeNoFuzzy(items);
   console.log(`      ${noFuzzy.length} 個答案鍵停用容錯（與他鍵編輯距離 ≤1，開容錯會誤判為對）`);
 
-  console.log('[6/8] 斷言資產鍵唯一');
+  console.log('[7/9] 斷言資產鍵唯一');
   const keys = new Map();
   for (const it of items) {
     const k = it.img;
@@ -301,7 +379,7 @@ async function main() {
   }
   console.log(`      ${keys.size.toLocaleString()} / ${items.length.toLocaleString()} 唯一 ✓`);
 
-  console.log('[7/8] 比對變動幅度，沿用未變動項目的來源雜湊');
+  console.log('[8/9] 比對變動幅度，沿用未變動項目的來源雜湊');
   let prev = null;
   if (fs.existsSync(outPath)) {
     try { prev = JSON.parse(fs.readFileSync(outPath, 'utf8')); } catch { /* 損毀視同無前版 */ }
@@ -325,7 +403,7 @@ async function main() {
     console.log('      無前版，視為首次建置');
   }
 
-  console.log('[8/8] 寫出');
+  console.log('[9/9] 寫出 pool.json 與 excluded.json');
   // meta 不含執行時間：否則來源未變仍會產生 diff，違反冪等（規格 B7）
   const payload = {
     meta: {
@@ -345,10 +423,55 @@ async function main() {
     },
     items,
   };
+  // ── D49：excluded.json ──────────────────────────────────────────
+  // 前端靠它把「未命中」分成「口服非固體」「題目品質不足」「不在資料集中」三類。
+  // 沒有它，第 1／2 類與第 3 類**無法區分**，D37 只能退化成兩類。
+  const excludedItems = [...excludedBy.entries()]
+    .map(([id, stage]) => ({ id, stage }))
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));   // 排序後輸出才冪等
+  const excludedPayload = {
+    meta: {
+      schema: 1,
+      ...(mtime ? { source_version: mtime } : {}),
+      // **配對識別以 content_hash 為準，不是日期**：同日重編日期不變而內容變了。
+      // 這條規則本檔第 51 行的既有註解早就寫過，v5.1 的規格卻用 source_version，
+      // 由 codex-checkplan 第二輪抓出來（判定 r2-2.4）
+      content_hash: payload.meta.content_hash,
+      count: excludedItems.length,
+    },
+    items: excludedItems,
+  };
+
+  // ── 成對驗證：**兩份都通過才寫，任一不成立則兩份都不寫** ──────────
+  const poolIds = new Set(items.map((i) => i.id));
+  const exIds = new Set(excludedItems.map((i) => i.id));
+  if (exIds.size !== excludedItems.length) die('excluded.json 的 id 有重複');
+  for (const it of excludedItems) {
+    if (!it.id) die('excluded.json 含空 id');
+    if (!/^Q[1-5]$/.test(it.stage)) die(`excluded.json 的 stage 值域外：${JSON.stringify(it.stage)}`);
+    if (poolIds.has(it.id)) die(`${it.id} 同時出現在 pool 與 excluded，違反互斥`);
+  }
+  const srcIds = new Set(rows.map((r) => String(r['許可證字號'] ?? '').trim()).filter(Boolean));
+  const union = poolIds.size + exIds.size;
+  if (union !== srcIds.size) {
+    die(`pool(${poolIds.size}) + excluded(${exIds.size}) = ${union}，` +
+        `與來源去重後的 ${srcIds.size} 不符——有品項在兩份輸出中都不見了`);
+  }
+  if (excludedPayload.meta.content_hash !== payload.meta.content_hash) {
+    die('兩檔的 content_hash 不一致，不成對，不發布');
+  }
+
+  const exPath = path.resolve(path.dirname(outPath), 'excluded.json');
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
   fs.writeFileSync(outPath, JSON.stringify(payload, null, 1) + '\n', 'utf8');
+  fs.writeFileSync(exPath, JSON.stringify(excludedPayload, null, 1) + '\n', 'utf8');
   const kb = (fs.statSync(outPath).size / 1024).toFixed(0);
+  const exKb = (fs.statSync(exPath).size / 1024).toFixed(0);
   console.log(`      ${path.relative(ROOT, outPath)}  ${items.length.toLocaleString()} 題  ${kb} KB ✓`);
+  console.log(`      ${path.relative(ROOT, exPath)}  ${excludedItems.length.toLocaleString()} 筆  ${exKb} KB ✓`);
+  const byStage = {};
+  for (const it of excludedItems) byStage[it.stage] = (byStage[it.stage] ?? 0) + 1;
+  console.log(`      淘汰階段分布：${Object.entries(byStage).sort().map(([k, v]) => `${k} ${v}`).join('／')}`);
 }
 
 // 直接執行才跑管線。沒有這道 guard 的話，測試一 import 就會真的去下載 TFDA 來源——

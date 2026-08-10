@@ -287,7 +287,8 @@ function sourceRows({ keep = 6, filler = 5200 } = {}) {
   const rows = [];
   for (let i = 0; i < filler; i++) {
     rows.push({
-      許可證字號: `衛部藥輸字第F${String(i).padStart(5, '0')}號`,
+      // B13 起，前綴必須在 D34.4 的 18 種表內；`第F` 這種合成前綴會被管線中止
+      許可證字號: `衛部藥輸字第${String(i).padStart(6, '0')}號`,
       英文品名: `FILLER INJECTION ${i}`,
       外觀圖檔連結: `https://example.invalid/f${i}.jpg`,
       形狀: '注射劑',                  // ← Q1 濾掉
@@ -297,7 +298,7 @@ function sourceRows({ keep = 6, filler = 5200 } = {}) {
   const NAMES = ['ALFATIN', 'BRAVOZOL', 'CHARLIDINE', 'DELTAMOX', 'ECHOPRIL', 'FOXTROLOL'];
   for (let i = 0; i < keep; i++) {
     rows.push({
-      許可證字號: `衛部藥製字第K${String(i).padStart(5, '0')}號`,
+      許可證字號: `衛部藥製字第${String(i).padStart(6, '0')}號`,
       英文品名: `${NAMES[i % NAMES.length]} TABLETS ${i} MG`,
       中文品名: `測試錠 ${i}`,
       外觀圖檔連結: `https://example.invalid/k${i}.jpg`,
@@ -418,5 +419,219 @@ describe('build-pool 的純函式可在不觸發下載的情況下 import', () =
           `${label}：main() 未進入取得來源那一步`);
       }
     }
+  });
+});
+
+// ══ V5 批次 2：excluded.json（規格 D49、B10–B13）═══════════════════════
+
+/** 實跑 build-pool，回傳 stdout ＋ 兩份產物；失敗時回傳 error 與兩檔的位元組 */
+function runPair(zip, { seedFiles = null } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'idquiz-pair-'));
+  try {
+    const zipPath = path.join(dir, 'source.zip');
+    const outPath = path.join(dir, 'pool.json');
+    const exPath = path.join(dir, 'excluded.json');
+    fs.writeFileSync(zipPath, zip);
+    if (seedFiles) {
+      fs.writeFileSync(outPath, seedFiles.pool, 'utf8');
+      fs.writeFileSync(exPath, seedFiles.excluded, 'utf8');
+    }
+    let stdout = null, error = null;
+    try {
+      stdout = execFileSync(process.execPath,
+        ['tools/build-pool.mjs', '--source', zipPath, '--out', outPath],
+        { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (e) {
+      error = String(e.stderr ?? '') + String(e.stdout ?? '');
+    }
+    const read = (p) => (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null);
+    return {
+      stdout, error,
+      poolRaw: read(outPath), excludedRaw: read(exPath),
+      pool: error ? null : JSON.parse(read(outPath)),
+      excluded: error ? null : JSON.parse(read(exPath)),
+    };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** 每個 Q stage 各一筆已知 id ＋ 已知 survivor，其餘用 filler 撐過 5,000 列下限 */
+function stageRows() {
+  const rows = sourceRows({ keep: 4, filler: 5200 });
+  const base = { 顏色: '白色', 刻痕: '無', 外觀尺寸: '9mm', 標註二: '' };
+  rows.push(
+    // Q1：形狀非固體口服
+    { ...base, 許可證字號: '衛署藥製字第900001號', 英文品名: 'STAGEONE SYRUP', 形狀: '液劑(包含糖漿用粉劑)',
+      外觀圖檔連結: 'https://example.invalid/1.jpg', 標註一: 'S1' },
+    // Q2：無外觀圖檔連結
+    { ...base, 許可證字號: '衛署藥製字第900002號', 英文品名: 'STAGETWO TABLETS', 形狀: '圓形',
+      外觀圖檔連結: '', 標註一: 'S2' },
+    // Q3：正規化後答案鍵 < 3 字元
+    { ...base, 許可證字號: '衛署藥製字第900003號', 英文品名: 'AB', 形狀: '圓形',
+      外觀圖檔連結: 'https://example.invalid/3.jpg', 標註一: 'S3' },
+    // Q4：無刻字
+    { ...base, 許可證字號: '衛署藥製字第900004號', 英文品名: 'STAGEFOUR TABLETS', 形狀: '圓形',
+      外觀圖檔連結: 'https://example.invalid/4.jpg', 標註一: '' },
+    // Q5：兩筆外觀判別特徵全同但答案鍵不同 → 整組排除
+    { ...base, 許可證字號: '衛署藥製字第900005號', 英文品名: 'STAGEFIVE ALPHA TABLETS', 形狀: '圓形',
+      外觀圖檔連結: 'https://example.invalid/5a.jpg', 標註一: 'SAME', 外觀尺寸: '11mm' },
+    { ...base, 許可證字號: '衛署藥製字第900006號', 英文品名: 'STAGEFIVE BRAVO TABLETS', 形狀: '圓形',
+      外觀圖檔連結: 'https://example.invalid/5b.jpg', 標註一: 'SAME', 外觀尺寸: '11mm' },
+  );
+  return rows;
+}
+
+const zipOf = (rows) => makeZip([{
+  name: '42_5.json',
+  content: Buffer.from(JSON.stringify(rows), 'utf8'),
+  dateWord: dosWord(2026, 8, 10),
+}]);
+
+describe('B10 excluded.json 的逐筆精確輸出與聚合規則', () => {
+  test('每個 Q stage 各 ≥1 筆，逐筆驗落在哪一邊與其 stage', () => {
+    // 〔堵〕把所有 id 都塞進 excluded、pool 留空，**互斥與聯集仍然成立**——
+    //       管線全綠但正式題庫消失。因此要逐筆釘住精確歸屬，不能只驗集合性質
+    const { pool, excluded } = runPair(zipOf(stageRows()));
+    const stageOf = new Map(excluded.items.map((e) => [e.id, e.stage]));
+    const poolIds = new Set(pool.items.map((i) => i.id));
+
+    const EXPECT = [
+      ['衛署藥製字第900001號', 'Q1'], ['衛署藥製字第900002號', 'Q2'],
+      ['衛署藥製字第900003號', 'Q3'], ['衛署藥製字第900004號', 'Q4'],
+      ['衛署藥製字第900005號', 'Q5'], ['衛署藥製字第900006號', 'Q5'],
+    ];
+    for (const [id, stage] of EXPECT) {
+      assert.equal(stageOf.get(id), stage, `${id} 應被 ${stage} 淘汰`);
+      assert.ok(!poolIds.has(id), `${id} 不應同時出現在 pool`);
+    }
+    // 已知 survivor：sourceRows 的 keep 段落必須真的進 pool
+    assert.ok(pool.items.length >= 4, 'pool 不得為空——這正是上面〔堵〕要防的');
+    for (const it of pool.items) {
+      assert.ok(!stageOf.has(it.id), `${it.id} 進了 pool 就不該在 excluded`);
+    }
+  });
+
+  test('互斥、聯集完整、count 與 items 長度一致', () => {
+    const { pool, excluded } = runPair(zipOf(stageRows()));
+    const srcIds = new Set(stageRows().map((r) => r['許可證字號']));
+    const poolIds = new Set(pool.items.map((i) => i.id));
+    const exIds = new Set(excluded.items.map((i) => i.id));
+    assert.equal([...poolIds].filter((i) => exIds.has(i)).length, 0, '兩者必須互斥');
+    assert.equal(poolIds.size + exIds.size, srcIds.size, '聯集須等於來源去重後的 id 集合');
+    assert.equal(excluded.meta.count, excluded.items.length);
+    assert.equal(pool.meta.count, pool.items.length);
+    assert.ok(exIds.size > 0 && poolIds.size > 0, '兩邊都不得為空');
+  });
+
+  test('同一 id 多列：任一列存活即算 matched，不進 excluded', () => {
+    // 規格 §5.1。實測來源目前 id 全唯一，此規則不會被觸發；
+    // 仍要釘住，否則未來資料變動時行為是碰運氣的
+    const rows = stageRows();
+    rows.push(
+      { 許可證字號: '衛署藥製字第900007號', 英文品名: 'DUPLICATE ALPHA TABLETS', 形狀: '液劑(包含糖漿用粉劑)',
+        外觀圖檔連結: 'https://example.invalid/d1.jpg', 顏色: '白色', 刻痕: '無', 標註一: 'DUP', 外觀尺寸: '7mm' },
+      { 許可證字號: '衛署藥製字第900007號', 英文品名: 'DUPLICATE ALPHA TABLETS', 形狀: '圓形',
+        外觀圖檔連結: 'https://example.invalid/d2.jpg', 顏色: '白色', 刻痕: '無', 標註一: 'DUP', 外觀尺寸: '7mm' },
+    );
+    const { pool, excluded } = runPair(zipOf(rows));
+    assert.ok(pool.items.some((i) => i.id === '衛署藥製字第900007號'), '存活列應讓該 id 進 pool');
+    assert.ok(!excluded.items.some((i) => i.id === '衛署藥製字第900007號'),
+      '同一 id 不得同時出現在 excluded');
+  });
+
+  test('同一 id 全數淘汰時取最早失敗階段，不是最後一個', () => {
+    // 〔堵〕id 一旦被淘汰就離開管線，markOut 對單列 id 只會被呼叫一次——
+    //       因此「first-wins vs last-wins」**只有在同一 id 兩列各在不同階段淘汰時**
+    //       才有差別。少了這條 fixture，把 `if (!has)` 拿掉也全綠（實跑確認過）
+    const rows = stageRows();
+    rows.push(
+      // 同一 id 兩列：一列 Q1 淘汰（非固體），一列 Q4 淘汰（無刻字）
+      { 許可證字號: '衛署藥製字第900008號', 英文品名: 'EARLIEST ALPHA SYRUP', 形狀: '液劑(包含糖漿用粉劑)',
+        外觀圖檔連結: 'https://example.invalid/e1.jpg', 顏色: '白色', 刻痕: '無', 標註一: 'E1', 外觀尺寸: '6mm' },
+      { 許可證字號: '衛署藥製字第900008號', 英文品名: 'EARLIEST ALPHA TABLETS', 形狀: '圓形',
+        外觀圖檔連結: 'https://example.invalid/e2.jpg', 顏色: '白色', 刻痕: '無', 標註一: '', 外觀尺寸: '6mm' },
+    );
+    const { pool, excluded } = runPair(zipOf(rows));
+    assert.ok(!pool.items.some((i) => i.id === '衛署藥製字第900008號'), '兩列都淘汰，不得進 pool');
+    const e = excluded.items.find((i) => i.id === '衛署藥製字第900008號');
+    assert.ok(e, '兩列都淘汰的 id 必須出現在 excluded');
+    assert.equal(e.stage, 'Q1', '應記錄**最早**的失敗階段 Q1，而非較晚的 Q4');
+  });
+
+  test('來源列順序不影響結果', () => {
+    // 〔堵〕若「首次淘汰階段」是依來源列順序而非階段順序決定，倒序就會產生不同 stage
+    const rows = stageRows();
+    const a = runPair(zipOf(rows)).excluded;
+    const b = runPair(zipOf([...rows].reverse())).excluded;
+    const norm = (x) => JSON.stringify([...x.items].sort((p, q) => (p.id < q.id ? -1 : 1)));
+    assert.equal(norm(a), norm(b), 'excluded 的內容不得依來源列順序改變');
+  });
+});
+
+describe('B11 stage 值域封閉', () => {
+  test('產出的 stage 全部落在 Q1–Q5，且五種都出現過', () => {
+    const { excluded } = runPair(zipOf(stageRows()));
+    const seen = new Set();
+    for (const it of excluded.items) {
+      assert.match(it.stage, /^Q[1-5]$/, `stage 值域外：${JSON.stringify(it.stage)}`);
+      assert.ok(it.id && typeof it.id === 'string', 'id 不得為空');
+      seen.add(it.stage);
+    }
+    assert.deepEqual([...seen].sort(), ['Q1', 'Q2', 'Q3', 'Q4', 'Q5'],
+      '五個階段都要有 fixture，否則某個階段的歸類永遠沒被驗過');
+  });
+
+  // 註：規格 B11 另有「注入未知 stage 的 fixture，管線必須 fail」。
+  // stage 是**管線自己產生**的，不從輸入讀取，因此那個方向屬於**讀取端**的責任
+  // （前端載入 excluded.json 時的 schema 驗證），列在批次 3。
+  // 這裡不寫一條構造不出來的斷言——那會是恆真的假綠燈。
+});
+
+describe('B12 兩檔以 content_hash 成對，且失敗時位元組不變', () => {
+  test('成功時兩檔的 content_hash 相同', () => {
+    const { pool, excluded } = runPair(zipOf(stageRows()));
+    assert.equal(excluded.meta.content_hash, pool.meta.content_hash);
+    assert.match(pool.meta.content_hash, /^sha256:[0-9a-f]{64}$/);
+    assert.equal(excluded.meta.source_version, pool.meta.source_version);
+  });
+
+  test('失敗時預先放置的兩檔位元組完全不變', () => {
+    // 〔堵〕「不得寫出任何檔案」偵測不到**先寫後回滾**，只證明了 exit code 非零。
+    //       改用 sentinel：失敗後兩檔必須逐位元組相同
+    const seed = { pool: '{"SENTINEL":"pool"}\n', excluded: '{"SENTINEL":"excluded"}\n' };
+    const bad = stageRows();
+    bad.push({ 許可證字號: '衛福部新式字第000001號', 英文品名: 'UNKNOWN PREFIX TABLETS', 形狀: '圓形',
+      外觀圖檔連結: 'https://example.invalid/u.jpg', 顏色: '白色', 刻痕: '無', 標註一: 'U1' });
+    const r = runPair(zipOf(bad), { seedFiles: seed });
+    assert.ok(r.error, '應中止');
+    assert.equal(r.poolRaw, seed.pool, 'pool.json 位元組必須完全不變');
+    assert.equal(r.excludedRaw, seed.excluded, 'excluded.json 位元組必須完全不變');
+  });
+});
+
+describe('B13 前綴表完整性', () => {
+  test('未知前綴且該筆被淘汰時仍須中止，並回報精確筆數', () => {
+    // 〔堵〕若注入的未知前綴那筆**剛好存活**，只掃 pool.json 的錯誤實作也會通過，
+    //       完全沒堵住 v5.1 的真正失敗模式（前綴表從存活品項導出而漏了 5 種）。
+    //       因此 fixture 刻意讓它在 Q1 就被淘汰，且注入多筆並斷言精確筆數
+    const rows = stageRows();
+    for (let i = 0; i < 3; i++) {
+      rows.push({ 許可證字號: `衛福部新式字第00000${i}號`, 英文品名: `UNKNOWNPREFIX ${i} SYRUP`,
+        形狀: '液劑(包含糖漿用粉劑)',     // ← 保證在 Q1 被淘汰，不會進 pool
+        外觀圖檔連結: `https://example.invalid/u${i}.jpg`,
+        顏色: '白色', 刻痕: '無', 標註一: `U${i}` });
+    }
+    const r = runPair(zipOf(rows));
+    assert.ok(r.error, '遇未知前綴必須中止，不得只是警告');
+    assert.match(r.error, /衛福部新式字第/, '錯誤訊息須含該前綴');
+    assert.match(r.error, /× 3 筆/, '須回報精確筆數，不得硬寫 1 筆');
+    assert.match(r.error, /prefixTableVer/, '須指出這是 wire contract 升版的決策');
+  });
+
+  test('18 種前綴全在表內時正常完成', () => {
+    const r = runPair(zipOf(stageRows()));
+    assert.equal(r.error, null);
+    assert.match(r.stdout, /前綴皆在 D34\.4 的 18 種表內/);
   });
 });
