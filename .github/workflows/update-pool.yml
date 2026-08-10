@@ -106,6 +106,20 @@ jobs:
                 console.log(`| 內容雜湊 | \`${m.content_hash.slice(0, 23)}…\` |`);
                 console.log(`| 停用容錯鍵數 | ${(m.no_fuzzy || []).length} |`);
                 for (const [k, v] of Object.entries(m.stages || {})) console.log(`| ${k} | ${v} |`);
+                // excluded.json 也要報：只讀 pool 的話，半寫入或成對驗證失敗時
+                // 仍會顯示看似成功的題庫統計，造成操作層面的虛假完成感
+                const fs = require("fs");
+                if (!fs.existsSync("./data/excluded.json")) {
+                  console.log("| **excluded.json** | ⚠️ **不存在——未命中三分類會靜默失效** |");
+                } else {
+                  const ex = require("./data/excluded.json");
+                  const paired = ex.meta.content_hash === m.content_hash;
+                  console.log(`| excluded 筆數 | ${ex.meta.count} |`);
+                  console.log(`| 兩檔成對 | ${paired ? "✓" : "✖ **content_hash 不一致**"} |`);
+                  const by = {};
+                  for (const it of ex.items) by[it.stage] = (by[it.stage] || 0) + 1;
+                  console.log(`| 淘汰階段 | ${Object.entries(by).sort().map(([k, v]) => `${k} ${v}`).join(" ／ ")} |`);
+                }
               '
             else
               echo '⚠️ 未產出 pool.json'

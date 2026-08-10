@@ -21,7 +21,8 @@ import zlib from 'node:zlib';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { ROOT } from './_ui-harness.mjs';
-import { dosDateToISO, carryHashes, isSha256 } from '../tools/build-pool.mjs';
+import { dosDateToISO, carryHashes, isSha256, validatePair } from '../tools/build-pool.mjs';
+import { PREFIX_TABLE } from '../formulary.js';
 
 // ══ SC-2 來源版本 ═════════════════════════════════════════════════════
 
@@ -559,6 +560,20 @@ describe('B10 excluded.json 的逐筆精確輸出與聚合規則', () => {
     assert.equal(e.stage, 'Q1', '應記錄**最早**的失敗階段 Q1，而非較晚的 Q4');
   });
 
+  test('空 id 必須明確中止，不得從母集合中靜默消失', () => {
+    // 〔堵〕`markOut` 與 `srcIds` 若兩邊都 filter(Boolean)，空 id 會**同時**從
+    //       pool、excluded、srcIds 三個集合消失，`|pool|+|excluded|===|src|`
+    //       照樣成立——完整性斷言看不見錯誤資料。實跑確認：在 checkPrefixTable
+    //       加 `if (!id) continue;` → 仍全綠（覆審發現 8）
+    for (const badId of ['', '   ']) {
+      const rows = stageRows();
+      rows.push({ 許可證字號: badId, 英文品名: 'EMPTYID SYRUP', 形狀: '液劑(包含糖漿用粉劑)',
+        外觀圖檔連結: 'https://example.invalid/z.jpg', 顏色: '白色', 刻痕: '無', 標註一: 'Z1' });
+      const r = runPair(zipOf(rows));
+      assert.ok(r.error, `空 id（${JSON.stringify(badId)}）必須中止，不得靜默略過`);
+    }
+  });
+
   test('來源列順序不影響結果', () => {
     // 〔堵〕若「首次淘汰階段」是依來源列順序而非階段順序決定，倒序就會產生不同 stage
     const rows = stageRows();
@@ -610,6 +625,54 @@ describe('B12 兩檔以 content_hash 成對，且失敗時位元組不變', () =
   });
 });
 
+describe('B12b validatePair 的 hash mismatch（覆審發現 3／5）', () => {
+  // 〔堵〕原本這條檢查內聯在 main() 裡，而 excluded 的 content_hash 是**上一行才從
+  //       pool 複製過去的**——在正常執行中永遠不成立，是死碼。拿掉整段仍全綠。
+  //       抽成純函式後才餵得進「除 hash 外完全合法但不一致」的輸入
+  const pool = {
+    meta: { schema: 1, content_hash: 'sha256:' + 'a'.repeat(64), count: 1 },
+    items: [{ id: '衛署藥製字第000001號' }],
+  };
+  const goodExcluded = {
+    meta: { schema: 1, content_hash: 'sha256:' + 'a'.repeat(64), count: 1 },
+    items: [{ id: '衛署藥製字第000002號', stage: 'Q1' }],
+  };
+
+  test('完全合法的一對通過', () => {
+    assert.deepEqual(validatePair(pool, goodExcluded), []);
+  });
+
+  test('除 hash 外完全合法但不一致 → 明確失敗', () => {
+    const bad = { ...goodExcluded, meta: { ...goodExcluded.meta, content_hash: 'sha256:' + 'b'.repeat(64) } };
+    const errs = validatePair(pool, bad);
+    assert.equal(errs.length, 1, '只應報 hash 這一項，證明其餘欄位都合法');
+    assert.match(errs[0], /content_hash 不成對/);
+  });
+
+  test('其餘 D49 不變量逐條可觸發', () => {
+    const mk = (over) => ({ ...goodExcluded, ...over });
+    const cases = [
+      ['缺 meta', { meta: undefined }, /缺 meta/],
+      ['schema 未知', mk({ meta: { ...goodExcluded.meta, schema: 99 } }), /schema 未知/],
+      ['count 不符', mk({ meta: { ...goodExcluded.meta, count: 5 } }), /count\(5\)/],
+      ['id 重複', mk({ items: [goodExcluded.items[0], goodExcluded.items[0]] }), /id 重複/],
+      ['stage 值域外', mk({ items: [{ id: '衛署藥製字第000002號', stage: 'Q6' }] }), /stage 值域外/],
+      ['空 id', mk({ items: [{ id: '   ', stage: 'Q1' }] }), /空或非字串 id/],
+      ['與 pool 交集', mk({ items: [{ id: '衛署藥製字第000001號', stage: 'Q1' }] }), /違反互斥/],
+    ];
+    for (const [name, ex, re] of cases) {
+      const errs = validatePair(pool, ex === undefined ? {} : { ...goodExcluded, ...ex });
+      assert.ok(errs.some((e) => re.test(e)), `${name} 應被抓到，實得 ${JSON.stringify(errs)}`);
+    }
+  });
+
+  test('聯集檢查：srcIds 為 null 時跳過，給定時生效', () => {
+    assert.deepEqual(validatePair(pool, goodExcluded, null), []);
+    const src = new Set(['衛署藥製字第000001號', '衛署藥製字第000002號', '衛署藥製字第000003號']);
+    assert.ok(validatePair(pool, goodExcluded, src).some((e) => /都不見了/.test(e)));
+  });
+});
+
 describe('B13 前綴表完整性', () => {
   test('未知前綴且該筆被淘汰時仍須中止，並回報精確筆數', () => {
     // 〔堵〕若注入的未知前綴那筆**剛好存活**，只掃 pool.json 的錯誤實作也會通過，
@@ -629,9 +692,31 @@ describe('B13 前綴表完整性', () => {
     assert.match(r.error, /prefixTableVer/, '須指出這是 wire contract 升版的決策');
   });
 
-  test('18 種前綴全在表內時正常完成', () => {
-    const r = runPair(zipOf(stageRows()));
-    assert.equal(r.error, null);
-    assert.match(r.stdout, /前綴皆在 D34\.4 的 18 種表內/);
+  test('D34.4 的 18 種前綴逐一出現在來源時都必須被接受', () => {
+    // 〔堵〕原本只斷言 stdout 的 `/18 種表內/`，而**那個 18 來自 KNOWN_PREFIXES.size，
+    //       不是 fixture 的觀察結果**。把表中 11 種換成假前綴（Set 大小仍 18）→ 仍全綠
+    //       （2026-08-10 實跑確認）。改成表驅動：每種前綴都真的放一列進來源
+    const rows = stageRows();
+    // 號碼段刻意用 8xxxx：sourceRows() 的 filler 佔 000000–005199、keep 佔 000000–000003，
+    // 用小號碼會與既有 survivor 撞 id，而「任一列存活即 matched」會讓探針落進 pool
+    const probeNum = (e, i) => String(80001 + i).padStart(e.numWidth, '0');
+    PREFIX_TABLE.forEach((e, i) => {
+      const num = probeNum(e, i);
+      rows.push({
+        許可證字號: `${e.prefix}${num}號`,
+        英文品名: `PREFIXPROBE ${i} SYRUP`,
+        形狀: '液劑(包含糖漿用粉劑)',   // Q1 淘汰，不進 pool、不影響 computeNoFuzzy 的 O(n²)
+        外觀圖檔連結: `https://example.invalid/p${i}.jpg`,
+        顏色: '白色', 刻痕: '無', 標註一: `P${i}`, 外觀尺寸: '5mm',
+      });
+    });
+    const r = runPair(zipOf(rows));
+    assert.equal(r.error, null, `18 種前綴都應被接受，實得：${r.error}`);
+    // 每一種前綴的那一筆都要真的出現在 excluded，證明它走完了全程而非被靜默丟掉
+    const exIds = new Set(r.excluded.items.map((i) => i.id));
+    PREFIX_TABLE.forEach((e, i) => {
+      const id = `${e.prefix}${probeNum(e, i)}號`;
+      assert.ok(exIds.has(id), `index ${i}（${e.prefix}）的探針 ${id} 應出現在 excluded`);
+    });
   });
 });

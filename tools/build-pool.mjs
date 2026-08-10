@@ -277,6 +277,61 @@ function buildPool(rows) {
 const KNOWN_PREFIXES = new Set(PREFIX_TABLE.map((e) => e.prefix));
 
 /**
+ * D49 的成對不變量。**回傳錯誤清單（空陣列＝通過），不拋例外**——
+ * `verify-data` 要一次列出全部問題，不是遇到第一個就停。
+ *
+ * 抽出來的理由（覆審發現 3／5／6）：原本這段內聯在 `main()` 裡，而 `excludedPayload`
+ * 的 `content_hash` 是**上一行才從 `payload` 複製過去的**，於是「兩檔 hash 不一致」
+ * 這條檢查在正常執行中**永遠不成立**——是死碼。拿掉它整段，測試仍全綠（已實跑確認）。
+ *
+ * 抽成純函式後它才有真實輸入：`verify-data` 餵的是**磁碟上兩份獨立讀進來的檔案**，
+ * 那裡的 hash 真的可能不一致（只更新其中一份、手動改過、部署到不同版本）。
+ *
+ * @param {object} pool      `pool.json` 的完整內容
+ * @param {object} excluded  `excluded.json` 的完整內容
+ * @param {Set<string>|null} srcIds 來源去重後的 id 集合；`null` 表示跳過聯集檢查
+ * @returns {string[]} 錯誤訊息清單
+ */
+export function validatePair(pool, excluded, srcIds = null) {
+  const errs = [];
+  const bad = (m) => errs.push(m);
+
+  if (!excluded || typeof excluded !== 'object') return ['excluded.json 不是物件'];
+  const meta = excluded.meta;
+  if (!meta || typeof meta !== 'object') return ['excluded.json 缺 meta（D49 要求 { meta, items }）'];
+  if (meta.schema !== 1) bad(`excluded.json 的 schema 未知：${JSON.stringify(meta.schema)}`);
+  if (!Array.isArray(excluded.items)) return ['excluded.json 的 items 不是陣列'];
+  if (meta.count !== excluded.items.length) {
+    bad(`excluded.json 的 count(${meta.count}) 與 items.length(${excluded.items.length}) 不符`);
+  }
+
+  const poolIds = new Set((pool?.items ?? []).map((i) => i.id));
+  const seen = new Set();
+  for (const it of excluded.items) {
+    if (!it || typeof it !== 'object') { bad('excluded.json 含非物件項目'); continue; }
+    if (typeof it.id !== 'string' || !it.id.trim()) { bad(`excluded.json 含空或非字串 id：${JSON.stringify(it.id)}`); continue; }
+    if (seen.has(it.id)) bad(`excluded.json 的 id 重複：${it.id}`);
+    seen.add(it.id);
+    if (!/^Q[1-5]$/.test(it.stage)) bad(`${it.id} 的 stage 值域外：${JSON.stringify(it.stage)}`);
+    if (poolIds.has(it.id)) bad(`${it.id} 同時出現在 pool 與 excluded，違反互斥`);
+  }
+
+  // 配對識別以 content_hash 為準，不是日期——同日重編日期不變而內容變了
+  if (meta.content_hash !== pool?.meta?.content_hash) {
+    bad(`兩檔的 content_hash 不成對：pool=${pool?.meta?.content_hash} excluded=${meta.content_hash}`);
+  }
+
+  if (srcIds) {
+    const union = poolIds.size + seen.size;
+    if (union !== srcIds.size) {
+      bad(`pool(${poolIds.size}) + excluded(${seen.size}) = ${union}，` +
+          `與來源去重後的 ${srcIds.size} 不符——有品項在兩份輸出中都不見了`);
+    }
+  }
+  return errs;
+}
+
+/**
  * B13 前綴表完整性 —— **掃來源全部列，不是掃存活品項**。
  *
  * 規格 v5.1 的前綴表只有 11 種，正是因為從 `pool.json` 的存活品項導出；
@@ -443,28 +498,38 @@ async function main() {
   };
 
   // ── 成對驗證：**兩份都通過才寫，任一不成立則兩份都不寫** ──────────
-  const poolIds = new Set(items.map((i) => i.id));
-  const exIds = new Set(excludedItems.map((i) => i.id));
-  if (exIds.size !== excludedItems.length) die('excluded.json 的 id 有重複');
-  for (const it of excludedItems) {
-    if (!it.id) die('excluded.json 含空 id');
-    if (!/^Q[1-5]$/.test(it.stage)) die(`excluded.json 的 stage 值域外：${JSON.stringify(it.stage)}`);
-    if (poolIds.has(it.id)) die(`${it.id} 同時出現在 pool 與 excluded，違反互斥`);
-  }
-  const srcIds = new Set(rows.map((r) => String(r['許可證字號'] ?? '').trim()).filter(Boolean));
-  const union = poolIds.size + exIds.size;
-  if (union !== srcIds.size) {
-    die(`pool(${poolIds.size}) + excluded(${exIds.size}) = ${union}，` +
-        `與來源去重後的 ${srcIds.size} 不符——有品項在兩份輸出中都不見了`);
-  }
-  if (excludedPayload.meta.content_hash !== payload.meta.content_hash) {
-    die('兩檔的 content_hash 不一致，不成對，不發布');
-  }
+  // 母集合刻意**不過濾空 id**（覆審發現 8）：原本兩邊都 `filter(Boolean)`，
+  // 空 id 於是從 pool、excluded、srcIds 三個集合中同時消失，
+  // `|pool| + |excluded| === |src|` 照樣成立——**完整性斷言看不見錯誤資料**。
+  // 空 id 本來就會先被 checkPrefixTable 擋下，這裡是第二道且母集合定義一致。
+  const srcIds = new Set(rows.map((r) => String(r['許可證字號'] ?? '').trim()));
+  if (srcIds.has('')) die('來源含空的許可證字號，中止');
+  const errs = validatePair(payload, excludedPayload, srcIds);
+  if (errs.length) die(`成對驗證失敗（${errs.length} 項）：\n  - ${errs.join('\n  - ')}`);
 
   const exPath = path.resolve(path.dirname(outPath), 'excluded.json');
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
-  fs.writeFileSync(outPath, JSON.stringify(payload, null, 1) + '\n', 'utf8');
-  fs.writeFileSync(exPath, JSON.stringify(excludedPayload, null, 1) + '\n', 'utf8');
+
+  // **成對寫出**（覆審發現 4）：先各寫一份 `.tmp`，**兩份都寫成功才 rename**。
+  // 原本是先寫 pool.json 再寫 excluded.json——第二次寫入失敗（磁碟滿、權限）
+  // 會留下「新 pool ＋ 舊或缺失 excluded」的半更新工作樹，
+  // 而錯誤訊息還印著「data/ 未變更」，那是不實的。
+  //
+  // 不採「在 workflow 用 $RUNNER_TEMP staging」的修法：`carryHashes()` 是從
+  // `outPath` 讀前版的，建到 staging 就讀不到前版 → `src_sha256` 全成 null →
+  // `fetch-images.py` 全量重抓 3,941 張圖。**那正是 SC-3 那個回歸**。
+  // rename 的作法同時保護 CI 與本機 CLI，且完全不動 workflow 的接力鏈。
+  const tmpPool = outPath + '.tmp';
+  const tmpEx = exPath + '.tmp';
+  try {
+    fs.writeFileSync(tmpPool, JSON.stringify(payload, null, 1) + '\n', 'utf8');
+    fs.writeFileSync(tmpEx, JSON.stringify(excludedPayload, null, 1) + '\n', 'utf8');
+    fs.renameSync(tmpPool, outPath);
+    fs.renameSync(tmpEx, exPath);
+  } catch (e) {
+    for (const t of [tmpPool, tmpEx]) { try { fs.unlinkSync(t); } catch { /* 已不存在 */ } }
+    die(`寫出失敗，兩份產物均未更新：${e.message}`);
+  }
   const kb = (fs.statSync(outPath).size / 1024).toFixed(0);
   const exKb = (fs.statSync(exPath).size / 1024).toFixed(0);
   console.log(`      ${path.relative(ROOT, outPath)}  ${items.length.toLocaleString()} 題  ${kb} KB ✓`);
