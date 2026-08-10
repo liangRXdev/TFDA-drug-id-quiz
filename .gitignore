@@ -12,3 +12,9 @@ __pycache__/
 
 # build-pool.mjs 的實跑輸出（--out .probe/…），不進 repo
 .probe/
+
+# 院內清單樣本（U1）：醫院採購品項，不進公開 repo
+data/院內*
+data/*.xls
+data/*.xlsx
+data/*.csv
