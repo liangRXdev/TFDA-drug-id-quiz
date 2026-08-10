@@ -184,20 +184,84 @@ CRC     0E 39 F2 A4        CRC-32 = 0x0E39F2A4
 
 ---
 
+## G6 — index 11–15 各一筆
+
+**用途**：**補上唯一沒有獨立 oracle 的區段**。2026-08-10 的 `/codex-review`（R-1）指出，
+G1–G5 只釘住 index **0、2、16、17**，而 11–15 完全靠 round-trip——
+**encoder 與 decoder 做對稱對調時 round-trip 恆等成立，測試 59/59 仍全綠**（已實跑確認）。
+後果是已分享的舊連結靜默解成不同的藥，而 wire format 是不可變契約。
+
+本組同時驗 `prefixIndex` 嚴格遞增（五組連續）。
+
+| 輸入 |
+|---|
+| ids = { `衛署菌疫輸字第000301號`, `衛部成製字第017220號`, `衛署成製字第007869號`, `衛部罕菌疫輸字第000022號`, `衛部成輸字第001002號` } |
+| `count` = 5、`unlistedCount` = 0 |
+
+```
+header  01 01 00 05 00 00
+grp 11  0B 01 AD 02          prefixIndex=11, n=1, delta=301
+grp 12  0C 01 C4 86 01       prefixIndex=12, n=1, delta=17220
+grp 13  0D 01 BD 3D          prefixIndex=13, n=1, delta=7869
+grp 14  0E 01 16             prefixIndex=14, n=1, delta=22
+grp 15  0F 01 EA 07          prefixIndex=15, n=1, delta=1002
+CRC     8D C8 89 FD          CRC-32 = 0x8DC889FD
+```
+
+| 欄位 | 值 |
+|---|---|
+| body（完整，30 bytes） | `01 01 00 05 00 00 0B 01 AD 02 0C 01 C4 86 01 0D 01 BD 3D 0E 01 16 0F 01 EA 07 8D C8 89 FD` |
+| **payload** | **`AQEABQAACwGtAgwBxIYBDQG9PQ4BFg8B6geNyIn9`**（40 字元） |
+| 還原 canonical id | 上列五筆 |
+
+---
+
+## G7 — 含最小號碼 1 的多元素集合
+
+**用途**：R-6。A39 的 permutation 需涵蓋最小合法號碼 1，
+但 G2／G4／G5 都不含 1，而 G1 是單元素（無順序可言）。
+本組 payload 長度 19（`% 4 === 3`），另可供 R-4 的「餘 3 字元尾端 bits」測試取用。
+
+| 輸入 |
+|---|
+| ids = { `衛署藥製字第000001號`, `衛署藥製字第000123號` } |
+| `count` = 2、`unlistedCount` = 0 |
+
+```
+header  01 01 00 02 00 00
+grp 0   00 02 01 7A          prefixIndex=0, n=2, delta=[1, 122]
+CRC     26 E3 7B 2F          CRC-32 = 0x26E37B2F
+```
+
+| 欄位 | 值 |
+|---|---|
+| body（完整，14 bytes） | `01 01 00 02 00 00 00 02 01 7A 26 E3 7B 2F` |
+| **payload** | **`AQEAAgAAAAIBeibjey8`**（19 字元） |
+| 還原 canonical id | `衛署藥製字第000001號`、`衛署藥製字第000123號` |
+
+---
+
 ## 涵蓋矩陣（對照 A38 的要求）
 
-| A38 要求 | G1 | G2 | G3 | G4 | G5 |
-|---|:-:|:-:|:-:|:-:|:-:|
-| 多個 prefix group | | ✔ | | ✔ | ✔ |
-| multi-byte varint | | ✔ | | | ✔ |
-| 最小號碼 1 | ✔ | | | | |
-| 該 index 的最大合法號碼 | | | | | ✔ |
-| 新增的 index 11–17 | | | | ✔ | ✔ |
-| CRC byte order | ✔ | ✔ | ✔ | ✔ | ✔ |
-| `count = 0 且 unlistedCount > 0` | | | ✔ | | |
-| 兩者皆非零 | | ✔ | | | |
-| 由 D34.4a 重建的 canonical id | ✔ | ✔ | —(空) | ✔ | ✔ |
-| base64url 的 `-` 與 `_` | | | | `_` | `-` |
+| A38 要求 | G1 | G2 | G3 | G4 | G5 | **G6** | **G7** |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| 多個 prefix group | | ✔ | | ✔ | ✔ | ✔ | |
+| multi-byte varint | | ✔ | | | ✔ | ✔ | |
+| 最小號碼 1 | ✔ | | | | | | ✔ |
+| 該 index 的最大合法號碼 | | | | | ✔ | | |
+| **index 11–15** | | | | | | **✔** | |
+| index 16–17 | | | | ✔ | ✔ | | |
+| CRC byte order | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `count = 0 且 unlistedCount > 0` | | | ✔ | | | | |
+| 兩者皆非零 | | ✔ | | | | | |
+| 由 D34.4a 重建的 canonical id | ✔ | ✔ | —(空) | ✔ | ✔ | ✔ | ✔ |
+| base64url 的 `-` 與 `_` | | | | `_` | `-` | | |
+| payload 長度 `% 4` | 2 | 0 | 2 | 2 | 3 | 0 | 3 |
+
+**index 涵蓋完整性**：0（G1／G2／G5／G7）、2（G2）、11–15（G6）、16–17（G4／G5）。
+其餘 index 1、3–10 目前仍只由 `PREFIX_SAMPLES` 的 round-trip 覆蓋——
+**已知缺口，列入下一批**（R-1 的修法只要求先補 11–15，因為那是 v5.2／v5.3 新增、
+最可能被錯抄的區段）。
 
 **尚未涵蓋、留給 A40 grammar-invalid 類的**（那些是「必須被拒絕」的向量，不屬 golden）：
 號碼 0、`prefixIndex` 越界（> 17）、非最短 varint、`count` 與實際不符、
