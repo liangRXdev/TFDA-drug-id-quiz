@@ -156,22 +156,20 @@ export function tokenize(text, opts = {}) {
     const t = line.trim();
     if (!t) return;                                     // 空行／純空白行：略過
     kept.push({ raw: t, lineNo: i + (hasHeader ? 2 : 1) });
-    if (Object.keys(DELIMS).some((d) => t.includes(d))) multi.push(kept.length - 1);
+    if (hasTopLevelDelim(t)) multi.push(kept.length - 1);
   });
 
   if (!kept.length) fail('EMPTY_INPUT', '整份輸入沒有任何 token');
 
-  // 單欄路徑：沒有任何一行含分隔符
-  if (!multi.length) {
-    if (delimiter !== undefined) fail('UNEXPECTED_DELIMITER', '輸入沒有多欄，但指定了分隔符');
-    return kept.map((k) => stripQuotes(k.raw));
-  }
-
-  // 多欄路徑：必須明確指定
-  if (delimiter === undefined || column === undefined) {
+  // **呼叫端明確指定 delimiter 就一律走多欄路徑**，不看偵測結果。
+  // 偵測只用來決定「未指定時要不要要求指定」——否則引號未閉合的一行會因為
+  // 偵測不到頂層分隔符而掉進單欄路徑，把 UNCLOSED_QUOTE 蓋成別的錯誤。
+  if (delimiter === undefined) {
+    if (!multi.length) return kept.map((k) => stripQuotes(k.raw));
     fail('COLUMN_NOT_SPECIFIED',
       `輸入含分隔符（第 ${kept[multi[0]].lineNo} 列起），必須指定 delimiter 與 column`);
   }
+  if (column === undefined) fail('COLUMN_NOT_SPECIFIED', '指定 delimiter 時必須一併指定 column');
   if (!(delimiter in DELIMS)) fail('BAD_DELIMITER', `不支援的分隔符：${JSON.stringify(delimiter)}`);
   if (!Number.isInteger(column) || column < 1) fail('BAD_COLUMN', 'column 必須是 ≥1 的整數');
 
@@ -185,6 +183,27 @@ export function tokenize(text, opts = {}) {
   });
   if (column > width) fail('COLUMN_OUT_OF_RANGE', `指定第 ${column} 欄，但只有 ${width} 欄`);
   return rows.map((r) => r[column - 1]);
+}
+
+/**
+ * 這一行有沒有**頂層**分隔符（引號內的不算）。
+ *
+ * D35.1a 明定「引號內的 delimiter 不算分欄」。若這裡用 `includes()` 直接搜原始字串，
+ * `"A,B"` 這種單一欄位會被誤判成多欄而整份拒絕——**契約說可以，實作卻擋掉**。
+ * 沿用 `splitRow` 的同一套引號狀態機，不新增依賴。
+ *
+ * 引號未閉合時後半段都算「在引號內」，因此不會偵測到頂層分隔符 → 走單欄路徑，
+ * 該 token 最終會正規化失敗並歸入 UNLISTED。這是安全的降級（明顯失敗而非靜默錯配）。
+ */
+function hasTopLevelDelim(line) {
+  let q = null;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (q) { if (c === q) q = null; }
+    else if (c === '"' || c === "'") q = c;
+    else if (c in DELIMS) return true;
+  }
+  return false;
 }
 
 /** RFC 4180 行為：引號內的分隔符不算分欄；引號未閉合即整份拒絕 */

@@ -32,6 +32,13 @@ const GOLDEN = [
     ids: ['衛署藥輸字第R00063號', '衛部藥製字第R00042號'] },
   { name: 'G5', payload: 'AQEAAgAAAAG_hD0QAZ-NBg458qQ', unlisted: 0,
     ids: ['衛署藥製字第999999號', '衛署藥輸字第R99999號'] },
+  // R-1：G1–G5 只釘住 index 0/2/16/17，11–15 完全靠 round-trip
+  { name: 'G6', payload: 'AQEABQAACwGtAgwBxIYBDQG9PQ4BFg8B6geNyIn9', unlisted: 0,
+    ids: ['衛署菌疫輸字第000301號', '衛部成製字第017220號', '衛署成製字第007869號',
+          '衛部罕菌疫輸字第000022號', '衛部成輸字第001002號'] },
+  // R-6：A39 的 permutation 需涵蓋最小號碼 1；G2/G4/G5 都不含 1，G1 是單元素
+  { name: 'G7', payload: 'AQEAAgAAAAIBeibjey8', unlisted: 0,
+    ids: ['衛署藥製字第000001號', '衛署藥製字第000123號'] },
 ];
 
 const bytesOf = (s) => [...s].map((c) => c.charCodeAt(0));
@@ -50,17 +57,39 @@ describe('A36 整串比對：18 種前綴與全部 93 組撞號', () => {
     assert.equal(PREFIX_TABLE[16].numWidth, 5);
   });
 
-  test('18 種前綴各自的真實 id 都能正規化成自己，且 wire index 正確', () => {
-    // 〔堵〕只驗「解析得出來」而不驗 wire index——parser 認得 18 個字串，
-    //       codec 的 index 卻可以全錯，兩者各自全綠到跨版本連結才爆
+  test('18 種前綴各自的真實 id 都能正規化成自己', () => {
     assert.equal(PREFIX_SAMPLES.length, 18);
     PREFIX_SAMPLES.forEach((id, i) => {
       assert.equal(normalizeLicense(id), id, `index ${i} 的樣本正規化後應不變`);
-      const { ids } = decodeFormulary(encodeFormulary([id], 0));
-      assert.deepEqual(ids, [id], `index ${i} 的 wire round-trip 應還原同一 id`);
       assert.ok(id.startsWith(PREFIX_TABLE[i].prefix),
         `index ${i} 的樣本應以 ${PREFIX_TABLE[i].prefix} 開頭`);
     });
+  });
+
+  test('wire index 由獨立 payload 釘死，不靠 round-trip', () => {
+    // 〔堵〕**這條原本是 round-trip**：encoder 與 decoder 做對稱對調時恆等成立，
+    //       59/59 全綠（2026-08-10 已實跑確認）。後果是已分享的舊連結靜默解成
+    //       不同的藥，而 wire format 是不可變契約，發布後改不了。
+    //       改為解**手推的硬編碼 payload**——對稱錯誤再也抵銷不掉。
+    const PINNED = [
+      ['AQEAAQAAAAEBmJjSAQ', 0, ['衛署藥製字第000001號']],
+      ['AQEAAwAFAAJ7veYDAgGl0QErHDki', 2, ['衛部藥輸字第026789號']],
+      ['AQEABQAACwGtAgwBxIYBDQG9PQ4BFg8B6geNyIn9', 11, ['衛署菌疫輸字第000301號']],
+      ['AQEABQAACwGtAgwBxIYBDQG9PQ4BFg8B6geNyIn9', 12, ['衛部成製字第017220號']],
+      ['AQEABQAACwGtAgwBxIYBDQG9PQ4BFg8B6geNyIn9', 13, ['衛署成製字第007869號']],
+      ['AQEABQAACwGtAgwBxIYBDQG9PQ4BFg8B6geNyIn9', 14, ['衛部罕菌疫輸字第000022號']],
+      ['AQEABQAACwGtAgwBxIYBDQG9PQ4BFg8B6geNyIn9', 15, ['衛部成輸字第001002號']],
+      ['AQEAAgAAEAE_EQEqRrKPSg', 16, ['衛署藥輸字第R00063號']],
+      ['AQEAAgAAEAE_EQEqRrKPSg', 17, ['衛部藥製字第R00042號']],
+    ];
+    for (const [payload, idx, expected] of PINNED) {
+      const { ids } = decodeFormulary(payload);
+      for (const e of expected) {
+        assert.ok(ids.includes(e), `payload 應解出 ${e}（index ${idx}）`);
+        assert.ok(e.startsWith(PREFIX_TABLE[idx].prefix),
+          `${e} 應對應 PREFIX_TABLE[${idx}]`);
+      }
+    }
   });
 
   test('全部 93 組撞號：組內任兩者正規化後不得相等，且各自非 null', () => {
@@ -69,9 +98,27 @@ describe('A36 整串比對：18 種前綴與全部 93 組撞號', () => {
     assert.equal(COLLISION_GROUPS.length, 93);
     for (const group of COLLISION_GROUPS) {
       const norms = group.map(normalizeLicense);
-      norms.forEach((n, i) => assert.notEqual(n, null, `${group[i]} 不應正規化失敗`));
+      // R-2：逐筆驗「命中自己」。只驗「非 null 且組內相異」時，
+      //      把號碼整批換成另一個號碼的 normalizer 仍會因前綴不同而通過
+      norms.forEach((n, i) => assert.equal(n, group[i],
+        `${group[i]} 應正規化成自己，實得 ${n}`));
       assert.equal(new Set(norms).size, group.length,
         `撞號組 ${group.join(' / ')} 正規化後彼此應相異`);
+    }
+  });
+
+  test('同一前綴、不同號碼也不得碰撞', () => {
+    // 〔堵〕撞號組全是「跨前綴」，因此前綴保留但號碼被改的實作仍可通過。
+    //       這條補的是同前綴內的號碼精確性
+    const pairs = [
+      ['衛署藥製字第000123號', '衛署藥製字第001230號'],
+      ['衛署藥製字第000001號', '衛署藥製字第000010號'],
+      ['衛署藥輸字第R00063號', '衛署藥輸字第R00630號'],
+    ];
+    for (const [a, b] of pairs) {
+      assert.equal(normalizeLicense(a), a);
+      assert.equal(normalizeLicense(b), b);
+      assert.notEqual(normalizeLicense(a), normalizeLicense(b));
     }
   });
 
@@ -277,16 +324,30 @@ describe('A40 解碼 fail-closed', () => {
       ['trailing bytes', [1, 1, 0, 1, 0, 0, 0x00, 0x01, 0x01, 0xFF], 'TRAILING_BYTES'],
       ['未知 formatVersion', [9, 1, 0, 1, 0, 0, 0x00, 0x01, 0x01], 'UNKNOWN_FORMAT_VERSION'],
       ['未知 prefixTableVer', [1, 9, 0, 1, 0, 0, 0x00, 0x01, 0x01], 'UNKNOWN_PREFIX_TABLE_VERSION'],
+      // R-3：A40 明列但原本完全沒有 fixture。實跑拿掉這兩個檢查 → 仍全綠
+      ['varint 超過 5 bytes',
+       [1, 1, 0, 1, 0, 0, 0x00, 0x01, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01], 'VARINT_TOO_LONG'],
+      ['varint overflow（第 5 byte 超出 32 bits）',
+       [1, 1, 0, 1, 0, 0, 0x00, 0x01, 0x80, 0x80, 0x80, 0x80, 0x10], 'VARINT_OVERFLOW'],
     ];
     for (const [name, pre, code] of cases) {
       throwsCode(() => decodeFormulary(withCrc(pre)), code, name);
     }
   });
 
-  test('非 base64url 字元與尾端未用 bits', () => {
+  test('非 base64url 字元與尾端未用 bits（餘 2 與餘 3 都要）', () => {
     throwsCode(() => decodeFormulary('AQEAAQAAAAEBmJjSA+'), 'BAD_BASE64');
-    // G1 尾字元 'Q' 帶 4 個未用 bits，改成帶非零尾 bits 的字元即非 canonical
+    // 餘 2 字元：G1 尾字元 'Q' 帶 4 個未用 bits，改成帶非零尾 bits 的字元即非 canonical
     throwsCode(() => decodeFormulary('AQEAAQAAAAEBmJjSAR'), 'NON_CANONICAL_BASE64');
+    // R-4 餘 3 字元：G7 長度 19（%4===3），尾字元 '8'(60) 低 2 bits 為 0；
+    //     換成 '9'(61) 低 2 bits 為 01 → 非 canonical。原本完全沒測這一路
+    throwsCode(() => decodeFormulary('AQEAAgAAAAIBeibjey9'), 'NON_CANONICAL_BASE64');
+  });
+
+  test('R-4：payload 長度 % 4 === 1 不合法', () => {
+    // 〔堵〕拿掉這條長度檢查後，合法 payload 後追加一個**不產生 byte** 的字元
+    //       仍會被接受——同一 body 就有了多個字串表示，破壞 canonical 唯一性
+    throwsCode(() => decodeFormulary(GOLDEN[1].payload + 'A'), 'BAD_BASE64_LENGTH');
   });
 
   test('截斷與過短', () => {
@@ -306,9 +367,19 @@ describe('A40 解碼 fail-closed', () => {
     assert.equal(ret, 'SENTINEL');
   });
 
-  test('uint16 邊界：count 與 unlistedCount 超界一律拒絕，不得截斷', () => {
+  test('uint16 邊界：unlistedCount 超界一律拒絕，不得截斷', () => {
     throwsCode(() => encodeFormulary([], 65536), 'UNLISTED_OUT_OF_RANGE');
     throwsCode(() => encodeFormulary([], -1), 'UNLISTED_OUT_OF_RANGE');
+  });
+
+  test('R-5：count 超界一律拒絕，不得靜默截成低 16 bits', () => {
+    // 〔堵〕原本的測試**名稱**宣稱驗了 count，實際只驗 unlistedCount。
+    //       實跑刪掉 count 檢查 → 仍全綠。測試名稱過度宣稱比沒有名稱更誤導
+    const many = Array.from({ length: 65536 },
+      (_, i) => `衛署藥製字第${String(i + 1).padStart(6, '0')}號`);
+    throwsCode(() => encodeFormulary(many, 0), 'COUNT_OUT_OF_RANGE');
+    // 恰好 65535 筆是合法的——邊界要兩側都釘
+    assert.doesNotThrow(() => encodeFormulary(many.slice(0, 65535), 0));
   });
 });
 
@@ -318,8 +389,18 @@ describe('A45 三種退化輸入（明列）', () => {
     throwsCode(() => tokenize(''), 'EMPTY_INPUT');
   });
 
-  test('(2) 只有空白與換行', () => {
+  test('(2) 只有空白與分隔符', () => {
+    // R-7：規格 A45 明寫「只有空白**與分隔符**」，原本只測了空白與 Tab
     throwsCode(() => tokenize('  \n\t\n   \r\n  '), 'EMPTY_INPUT');
+    // Tab 本身是空白，整行只有 Tab 會被 trim 成空行而略過（與上一行同一條路徑）
+    throwsCode(() => tokenize('\t\t\n\t'), 'EMPTY_INPUT');
+    // 非空白的分隔符：整行只有分隔符 → 多欄且每欄皆空 → 正規化後為 null
+    // （歸 UNLISTED），**不會誤配到任何一顆藥**
+    for (const d of [',', ';', '，']) {
+      const toks = tokenize(`${d}${d}`, { delimiter: d, column: 1 });
+      assert.deepEqual(toks, [''], `只有 ${JSON.stringify(d)} 時第 1 欄應為空字串`);
+      assert.equal(normalizeLicense(toks[0]), null);
+    }
   });
 
   test('(3) 同一合法 id 重複 20 次 → 去重後恰為 1 筆', () => {
@@ -365,6 +446,17 @@ describe('D35.1／D35.1a tokenization 契約', () => {
   test('引號內的分隔符不算分欄', () => {
     const t = tokenize('"A,B",衛署藥製字第020174號', { delimiter: ',', column: 2 });
     assert.deepEqual(t, ['衛署藥製字第020174號']);
+  });
+
+  test('R-8：頂層 delimiter 偵測必須 quote-aware', () => {
+    // 〔堵〕原本用 includes() 直接搜原始字串，`"A,B"` 這種**單一欄位**會被誤判成多欄
+    //       而整份拒絕——D35.1a 明定引號內的 delimiter 不算分欄。
+    //       嚴重度低（明顯拒絕而非靜默錯配），但違反已寫下的輸入契約
+    assert.deepEqual(tokenize('"A,B"'), ['A,B']);
+    assert.deepEqual(tokenize('"衛署藥製字第020174號"'), ['衛署藥製字第020174號']);
+    // 真的有頂層 delimiter 時仍須拒絕
+    throwsCode(() => tokenize('a,b'), 'COLUMN_NOT_SPECIFIED');
+    throwsCode(() => tokenize('"A,B",c'), 'COLUMN_NOT_SPECIFIED');
   });
 
   test('各列欄數不一致 → 整份拒絕並指出列號', () => {

@@ -13,10 +13,11 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 // 〔CR-3〕與 build-pool 共用同一條格式規則。各寫一份必然漂移，
 // 而漂移的後果是「產生端認為合法、驗證端放行」的值悄悄留在 pool 裡
-import { isSha256 } from './build-pool.mjs';
+import { isSha256, validatePair } from './build-pool.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const POOL = path.join(ROOT, 'data/pool.json');
+const EXCLUDED = path.join(ROOT, 'data/excluded.json');
 const IMG_DIR = path.join(ROOT, 'data/img');
 
 const MAX_EDGE = 640;
@@ -74,6 +75,23 @@ function main() {
   if (pool.meta.count !== items.length) {
     fail('META', `meta.count=${pool.meta.count} 與實際 ${items.length} 不符`);
   } else ok(`meta.count 與項目數一致（${items.length}）`);
+
+  // ── B14：excluded.json 必須存在且與 pool 成對（覆審發現 6）─────────
+  // pipeline 的 fixture 測試只能證明「測試執行時產生器曾經正確」，
+  // **不能證明即將 commit 的正式資料仍正確**。這裡驗的是磁碟上的真實產物，
+  // 而且兩份是**各自獨立讀進來的**——`validatePair` 的 hash 檢查在這裡才有真實輸入
+  if (!fs.existsSync(EXCLUDED)) {
+    fail('B14', 'data/excluded.json 不存在。前端的未命中三分類會靜默失效（D37／D49）');
+  } else {
+    let excluded = null;
+    try { excluded = JSON.parse(fs.readFileSync(EXCLUDED, 'utf8')); }
+    catch (e) { fail('B14', `data/excluded.json 不是合法 JSON：${e.message}`); }
+    if (excluded) {
+      const errs = validatePair(pool, excluded, null);
+      if (errs.length) for (const e of errs) fail('B14', e);
+      else ok(`excluded.json 與 pool 成對（${excluded.items.length.toLocaleString()} 筆）`);
+    }
+  }
 
   // meta 不得含執行時間，否則來源未變仍會產生 diff（規格 B7 冪等）
   const timeish = Object.keys(pool.meta).filter((k) => /time|date|generated|updated_at/i.test(k));
