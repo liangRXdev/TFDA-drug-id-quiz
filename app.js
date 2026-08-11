@@ -17,6 +17,11 @@ import {
   displayZh, longestStreak, currentStreak, rankTitle,
   wrongAnsKeys, drawRetryQuiz,
 } from './engine.js';
+import {
+  tokenize, normalizeLicense, encodeFormulary, decodeFormulary,
+  classifyFormulary, buildExcludedIndex, Category, CATEGORY_LABEL,
+  prepareFormulary, probeLevel, minUsableK,
+} from './formulary.js';
 
 const SCHEMA = 1;
 /**
@@ -66,6 +71,13 @@ const show = (el, on = true) => el.classList.toggle('hidden', !on);
 const state = {
   pool: null,
   noFuzzy: new Set(),
+  /**
+   * **目前出題的品項集合**。通用版＝全庫；院內版＝命中子集（D36）。
+   *
+   * 抽題、遞補、複習卷、閃卡一律讀這裡而不是 `state.pool.items`——
+   * 少換任何一處，那條路徑就會抽到院內沒有的藥，而畫面上完全看不出來。
+   */
+  items: [],
   index: null,
   eligible: new Map(),       // level → Set<ans>，整回合重複使用
   level: null,               // 使用者在選擇器上的選取
@@ -120,6 +132,24 @@ const state = {
    * 那筆改動涉及 L1/L3 共用的同一套寫法，屬獨立議題（見 verdict-flashcard.md CR-3）。
    */
   fNextToken: 1,
+
+  // ── V5 院內清單（規格 D34.1／D38／D40–D47）─────────────────────────
+  /**
+   * `null` ＝ 通用版。院內版時為
+   * `{ payload, N, unlistedCount, missing, items, index, levels }`。
+   *
+   * **`payload` 是唯一權威表示**（D45）：matched subset 由它導出，不另存。
+   * 月更後品項消失時 `missing` 會長出來，但 **payload 絕不覆寫成殘餘集合**——
+   * 覆寫會讓品項日後重新出現時也回不來（D41／C44）。
+   */
+  fx: null,
+  /** D46：一次只有一個進行中的操作。較舊的非同步結果晚到時必須丟棄 */
+  fxOp: 0,
+  /** 產連結頁才會抓的 `excluded.json` 索引；`null` ＝ 尚未載入或不可用（D47） */
+  excluded: null,
+  excludedError: null,
+  /** 產連結頁最近一次分析結果，供下載與產連結共用（不重算，避免兩份數字漂移） */
+  fxDraft: null,
 };
 
 // ── 載入題庫（失敗路徑見規格 C4）──────────────────────────────────────
@@ -132,6 +162,7 @@ function fatal(msg) {
   show($('result'), false);
   show($('flash'), false);
   show($('flashDone'), false);
+  show($('formulary'), false);
 }
 
 async function loadPool() {
@@ -163,6 +194,7 @@ async function loadPool() {
 
   state.pool = data;
   state.noFuzzy = new Set(data.meta.no_fuzzy || []);
+  state.items = data.items;
   state.index = buildIndex(data.items);
 
   const m = data.meta;
@@ -172,6 +204,10 @@ async function loadPool() {
     + ` ｜ <b>來源</b> ${m.source}`
     + (m.source_file ? ` ｜ <b>檔案</b> <span class="num">${m.source_file}</span>` : '');
   if (m.source_version) $('srcVer').textContent = `，資料版本 ${m.source_version}`;
+
+  // 院內清單必須在畫級別選擇器**之前**決定，否則會先畫出一輪全部可選的按鈕，
+  // 使用者可能在那個空檔按下一個其實不可用的級別（D46 的同型問題）
+  bootFormulary();
 
   renderLevelPicker();
   renderRecords();
@@ -346,15 +382,512 @@ function renderRecords() {
   }).join('');
 }
 
+// ── V5 院內清單：載入與降級（規格 D34.1／D38／D41／D43–D47）──────────
+
+/** D45 的 localStorage key。**前綴不可省**，理由同 `RECORDS_KEY` */
+const FORMULARY_KEY = 'tfda-drug-id-quiz:formulary';
+const FORMULARY_SCHEMA = 1;
+/** D42：上限量的是**完整 URL**，不是 payload */
+const MAX_URL_LEN = 1800;
+const FX_PARAM = 'fx';
+/** 畫面上最多列幾筆未命中；其餘走下載。一份 1500 列的清單全印會灌爆頁面 */
+const FX_LIST_CAP = 50;
+
+/**
+ * D45：讀取已保存的院內清單。**任何一條不成立都視為未載入，且不得 mutation。**
+ *
+ * 不「順手修復」也不刪除：讀不到不代表沒有，壞 JSON 更可能是未來版本寫的
+ * （沿用 `readRecords()` 的同一條紀律）。
+ *
+ * **回傳 tri-state 而不是 `null`**（依 codex-review CR-1）：
+ * 「這裡沒有清單」與「這裡有東西但我讀不出來」對後續行為的意義完全不同——
+ * 前者可以放心寫入，後者一寫就把讀不出來的那份**毀掉**，
+ * 而讀不出來最可能的原因正是「未來版本寫的」。
+ *
+ * @returns {{status:'ok', payload:string}|{status:'absent'}|{status:'error'}}
+ */
+function readFormulary() {
+  const s = storage();
+  if (!s) return { status: 'error' };            // 連 storage 都拿不到：不知道有沒有
+  let raw;
+  try { raw = s.getItem(FORMULARY_KEY); } catch { return { status: 'error' }; }
+  if (raw == null) return { status: 'absent' };
+  let o;
+  try { o = JSON.parse(raw); } catch { return { status: 'error' }; }
+  if (!o || o.v !== FORMULARY_SCHEMA || typeof o.payload !== 'string') return { status: 'error' };
+  try { decodeFormulary(o.payload); } catch { return { status: 'error' }; }
+  return { status: 'ok', payload: o.payload };
+}
+
+/** 寫入失敗回 `false`（呼叫端據此中止發布，見 D44.1 第 2 段） */
+function writeFormulary(payload) {
+  const s = storage();
+  if (!s) return false;
+  try {
+    s.setItem(FORMULARY_KEY, JSON.stringify({
+      v: FORMULARY_SCHEMA,
+      payload,
+      savedAt: new Date().toISOString(),
+      srcVersion: state.pool?.meta?.source_version ?? null,
+    }));
+    return true;
+  } catch (e) {
+    console.warn('[formulary] 寫入失敗', e);
+    return false;
+  }
+}
+
+/**
+ * 讀網址上的 `fx`。**「有這個參數但值是空的」與「沒有這個參數」必須分得開**
+ * （依 codex-review CR-4）：`?fx=` 是一條壞連結，§5.3 要求它走完整解碼並提示失敗，
+ * 而不是靜默當成通用版。
+ *
+ * @returns {{present: boolean, value: string}}
+ */
+function fxFromUrl() {
+  try {
+    const p = new URL(window.location.href).searchParams;
+    return { present: p.has(FX_PARAM), value: p.get(FX_PARAM) ?? '' };
+  } catch { return { present: false, value: '' }; }
+}
+
+/**
+ * D44.3：**只移除 `fx` 一個參數**，其餘 query 與 fragment 精確保留。
+ *
+ * 刻意做字串層的移除而不是 `searchParams.toString()` 回寫——後者會把其他參數
+ * 重新編碼（`%20` → `+` 之類），那不叫「精確保留」。
+ *
+ * 這是**成功提交後的冪等 cleanup，不納入交易**（D44.1 第 3 段）：
+ * 失敗時保留 `fx`，但**不得回滾已載入的清單**。重整會以同一 payload 再跑一次。
+ */
+function cleanupFxParam() {
+  try {
+    const u = new URL(window.location.href);
+    const raw = u.search.slice(1);
+    if (!raw) return true;
+    const segs = raw.split('&');
+    // **比對解碼後的名稱**（依 codex-review CR-3）：`searchParams.get()` 會把 `%66x`
+    // 解成 `fx` 而讀得到它，raw 字串比對卻刪不掉——那會留下「已消費卻還在網址上」的狀態。
+    // 同時**不過濾空 segment**：`?a=1&&b=2` 的那個空段也是「其餘 query」的一部分，
+    // 順手正規化掉就不叫「精確保留」了。
+    const kept = segs.filter((kv) => {
+      let k = kv.split('=')[0];
+      try { k = decodeURIComponent(k); } catch { /* 壞的百分號序列：照原樣比 */ }
+      return k !== FX_PARAM;
+    });
+    if (kept.length === segs.length) return true;                    // 沒有 fx：冪等
+    window.history.replaceState(null, '', u.pathname + (kept.length ? `?${kept.join('&')}` : '') + u.hash);
+    return true;
+  } catch (e) {
+    console.warn('[formulary] URL cleanup 失敗，fx 保留（清單不回滾）', e);
+    return false;
+  }
+}
+
+/**
+ * 子集化 ＋ 三級 probe。**產連結端與載入端走同一支**——
+ * 兩邊各寫一次的話，教學藥師看到「L2 可用」而新人載入後 L2 是灰的，
+ * 而兩邊的數字都「對」（各自算各自的）。
+ */
+function evaluateFormulary(payload, ids) {
+  const prep = prepareFormulary(state.pool.items, ids);
+  const levels = {};
+  for (const lv of LEVEL_ORDER) {
+    levels[lv] = probeLevel({ payload, level: lv, items: prep.items, index: prep.index });
+  }
+  return { prep, levels };
+}
+
+/**
+ * D44.1 的三段語意。**驗證階段全部成功前不發布任何一項。**
+ *
+ * 回傳 `{ok:true}` 或 `{ok:false, code, msg}`；失敗時記憶體與兩個 localStorage key
+ * **位元組完全不變**。這裡刻意不做「先發布再回滾」——那三個介面沒有共同 transaction，
+ * 回滾本身也可能失敗（規格明列這是平台提供不了的保證）。
+ */
+function activateFormulary(payload, { persist }) {
+  const op = ++state.fxOp;                                    // D46
+  const superseded = () => op !== state.fxOp;
+
+  // ── 1. 驗證階段（此段不得改動任何狀態）
+  let decoded;
+  try {
+    decoded = decodeFormulary(payload);
+  } catch (e) {
+    return { ok: false, code: e.code || 'DECODE_FAILED',
+      msg: '院內清單連結的內容損毀或格式不符，未載入。原本的設定沒有被更動。' };
+  }
+  const { prep, levels } = evaluateFormulary(payload, decoded.ids);
+  if (!prep.N) {
+    return { ok: false, code: 'NO_MATCH',
+      msg: '這份清單裡沒有任何品項出現在目前的外觀資料集，無法用它出題。' };
+  }
+  if (superseded()) return { ok: false, code: 'SUPERSEDED', msg: '' };
+
+  // ── 2. 提交階段：先寫 storage（拋錯視為失敗），再做單一不會拋錯的記憶體切換
+  if (persist && !writeFormulary(payload)) {
+    return { ok: false, code: 'STORAGE_FAILED',
+      msg: '無法在這個瀏覽器保存院內清單（儲存空間不可用或已滿），未載入。' };
+  }
+  state.fx = {
+    payload,
+    N: prep.N,
+    unlistedCount: decoded.unlistedCount,
+    missing: prep.missing,
+    items: prep.items,
+    index: prep.index,
+    levels,
+  };
+  state.items = prep.items;
+  state.index = prep.index;
+  state.eligible = new Map();       // 索引換了，舊的可用鍵快取全部作廢
+  state.lookAlike = null;           // 閃卡的外觀索引同理（閃卡也只用院內品項）
+  return { ok: true };
+}
+
+/**
+ * 啟動時決定通用版／院內版。
+ *
+ * 順序是**先還原已保存的清單，再處理網址上的 `fx`**：這樣一條損毀的連結
+ * 不會把已經在用的清單弄掉（C42 要的正是這個——錯誤後仍能從原清單組出一卷）。
+ */
+function bootFormulary() {
+  const saved = readFormulary();
+  if (saved.status === 'ok') activateFormulary(saved.payload, { persist: false });
+
+  const fx = fxFromUrl();
+  let bootError = '';
+  if (fx.present) {
+    /**
+     * **讀失敗時不得寫入**（CLAUDE.md 的既有紀律，codex-review CR-1）。
+     *
+     * 讀不出來最可能的原因是「未來版本寫的」，覆寫等於把它靜默毀掉。
+     * 此時仍讓這條連結在**本頁生效**（使用者的操作要有回應），但
+     * **既不保存、也不清掉網址上的 `fx`**——cleanup 本來就只是「成功提交後」的動作
+     * （D44.1 第 3 段），不保存卻把 fx 清掉，重整後連這一份也沒了。
+     */
+    const persist = saved.status !== 'error';
+    const r = activateFormulary(fx.value, { persist });
+    if (r.ok) {
+      if (persist) cleanupFxParam();     // cleanup 失敗也不回滾（D44.1 第 3 段）
+      else bootError = '本機已有一份無法讀取的院內清單，為避免覆寫它，這次只在本頁生效、'
+        + '不會保存。請保留這條網址。';
+    } else if (r.code !== 'SUPERSEDED') {
+      bootError = r.msg;                 // 失敗時 fx 保留在網址上，使用者可以重整重試
+    }
+  }
+  // 錯誤訊息交給 `renderFormularyState` 一起輸出——分兩處寫的話，
+  // 後跑的那個會把先寫的訊息蓋掉，而畫面上看起來就是「靜默失敗」
+  renderFormularyState(bootError);
+}
+
+/** 三級全部禁用（D41：此時要提示重新產生連結） */
+const fxAllDisabled = () => !!state.fx && LEVEL_ORDER.every((lv) => !state.fx.levels[lv].available);
+
+/**
+ * D34.1 的全額揭露句。**措辭必須與 D37.1 一致**——
+ * 「不在外觀資料集中」的那些多半是針劑、外用、眼藥，不是使用者打錯字號。
+ */
+function fxUnlistedSentence() {
+  const m = state.fx?.unlistedCount ?? 0;
+  if (!m) return '';
+  return `｜另有 ${m} 筆院內品項${CATEGORY_LABEL[Category.UNLISTED]}`;
+}
+
+/** 起始頁的院內版狀態。通用版時整塊隱藏（但啟動錯誤仍要說出來） */
+function renderFormularyState(bootError = '') {
+  const on = !!state.fx;
+  show($('startFxNote'), on);
+
+  const warn = bootError ? [bootError] : [];
+  if (on) {
+    $('sFxN').textContent = String(state.fx.N);
+    $('sFxUnlisted').textContent = fxUnlistedSentence();
+    // D41：品項消失是**降級不是阻斷**，而且要說出精確數字
+    if (state.fx.missing.length) {
+      warn.push(`清單中 ${state.fx.missing.length} 個品項已不在最新資料中，本次以 ${state.fx.N} 品項出題。`);
+    }
+    if (fxAllDisabled()) {
+      warn.push('目前這份清單三個級別都組不出題卷，請教學藥師重新產生連結。');
+    }
+  }
+  $('startFxWarn').textContent = warn.join(' ');
+  show($('startFxWarn'), warn.length > 0);
+}
+
+const FX_COVERAGE = {
+  quiz: { note: 'qFxNote', n: 'qFxN', k: 'qFxK', u: 'qFxUnlisted' },
+  result: { note: 'resultFxNote', n: 'rFxN', k: 'rFxK', u: 'rFxUnlisted' },
+};
+
+/**
+ * 答題頁／結算頁的涵蓋數字（C43）。
+ *
+ * **N 與 K 分別寫入，不得互相冒充**：N 是命中品項數（換級別不變），
+ * K 是該級可出題的答案鍵數（換級別會變，L2 通常比 N 少三成）。
+ */
+function renderFxCoverage(where, level) {
+  const el = FX_COVERAGE[where];
+  const on = !!state.fx;
+  show($(el.note), on);
+  if (!on) return;
+  $(el.n).textContent = String(state.fx.N);
+  $(el.k).textContent = String(state.fx.levels[level]?.K ?? 0);
+  $(el.u).textContent = fxUnlistedSentence();
+}
+
+// ── V5 產連結頁（教學藥師端，規格 §5.2／D42／D43／D47）────────────────
+
+/** 類別在畫面與下載檔中的固定順序。命中類不進下載檔（那是「有出題」的那些） */
+const FX_CATS = [
+  { code: Category.NON_SOLID_ORAL, key: 'nonSolidOral' },
+  { code: Category.LOW_QUALITY, key: 'lowQuality' },
+  { code: Category.UNLISTED, key: 'unlisted' },
+];
+
+/**
+ * D47：`excluded.json` 只在**打開產連結頁時**才抓。
+ *
+ * 它取不到、或與 `pool.json` 不成對時，**只有產連結功能停用**——
+ * 通用版與院內版出題完全不受影響（硬性要求：新增的檔案不得拖垮既有功能）。
+ */
+async function loadExcluded() {
+  if (state.excluded || state.excludedError) return;
+  const op = ++state.fxOp;
+  let data;
+  try {
+    const res = await fetch(DATA_DIR + 'excluded.json', { cache: 'no-cache' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    data = await res.json();
+  } catch (e) {
+    // **失敗路徑也要過 current-op gate**（依 codex-review CR-2）：
+    // 原本只有成功路徑檢查 op，於是「先開頁→返回→再開頁」時，
+    // 第一次那個**晚到的失敗**會蓋掉第二次的成功結果，產連結被誤停用到重整為止。
+    // D46 說的是「只有當前 operation 可以 commit」——失敗也是一種 commit。
+    if (op !== state.fxOp) return;
+    state.excludedError = `無法讀取排除清單（${e.message}），因此無法分類未命中的品項。`;
+    return;
+  }
+  if (op !== state.fxOp) return;                     // D46：有更新的操作接手了
+  try {
+    state.excluded = buildExcludedIndex(state.pool, data);
+  } catch (e) {
+    // 兩檔不成對（例如只更新了其中一份）→ 一律不產連結，不做半套分類
+    state.excludedError = `排除清單與題庫不成對或格式不符（${e.code ?? 'INVALID'}），`
+      + '無法分類未命中的品項。請重新整理，若持續發生請回報。';
+  }
+}
+
+function openFormularyPage() {
+  show($('start'), false);
+  show($('formulary'));
+  show($('fxResult'), false);
+  show($('fxError'), false);
+  loadExcluded().then(() => {
+    if (state.excludedError) {
+      $('fxError').textContent = state.excludedError;
+      show($('fxError'));
+      $('btnFxAnalyze').disabled = true;
+    }
+  });
+}
+
+function closeFormularyPage() {
+  show($('formulary'), false);
+  show($('start'));
+  window.scrollTo(0, 0);
+}
+
+/** 讀取分欄設定。未指定分隔符時走「每行一個」路徑（D35.1） */
+function fxTokenizeOpts() {
+  const delimiter = $('fxDelim').value || undefined;
+  const opts = { hasHeader: !!$('fxHeader').checked };
+  if (delimiter !== undefined) {
+    opts.delimiter = delimiter;
+    opts.column = Number($('fxColumn').value) || 0;
+  }
+  return opts;
+}
+
+const fxError = (msg) => {
+  $('fxError').textContent = msg;
+  show($('fxError'));
+  show($('fxResult'), false);
+  // **連結要明確收掉**，不能只靠隱藏外層容器（依 codex-review TG-8）：
+  // 上一輪產出的連結留在畫面上，教學藥師會以為它還對應現在這份清單
+  show($('fxLinkBox'), false);
+  state.fxDraft = null;
+};
+
+/** 分析清單並（在條件全滿足時）產出連結。**每一種不產出的情形都要說明原因** */
+function analyzeFormulary() {
+  if (state.excludedError) return fxError(state.excludedError);
+  if (!state.excluded) return fxError('排除清單尚未載入完成，請稍候再試。');
+
+  let tokens;
+  try {
+    tokens = tokenize($('fxInput').value, fxTokenizeOpts());
+  } catch (e) {
+    return fxError(`無法解析貼上的內容：${e.message}`);
+  }
+
+  const poolIds = new Set(state.pool.items.map((it) => it.id));
+  let cls;
+  try {
+    cls = classifyFormulary(tokens, { poolIds, excludedStages: state.excluded });
+  } catch (e) {
+    return fxError(`分類失敗：${e.message}`);
+  }
+
+  show($('fxError'), false);
+  state.fxDraft = cls;
+  renderFxBreakdown(cls);
+
+  if (!cls.matched.length) {
+    show($('fxLinkBox'), false);
+    $('fxLevels').innerHTML = '';
+    return fxErrorKeepResult('這份清單沒有任何品項出現在外觀資料集中，無法出題，因此不產生連結。');
+  }
+
+  // payload 帶「來源已知」的 id ＋ 第三類筆數（D34.1／D34.2a）
+  let payload;
+  try {
+    payload = encodeFormulary(cls.payloadIds, cls.unlistedCount);
+  } catch (e) {
+    show($('fxLinkBox'), false);
+    return fxErrorKeepResult(e.code === 'UNLISTED_OUT_OF_RANGE' || e.code === 'COUNT_OUT_OF_RANGE'
+      ? '清單筆數超出連結格式上限，請縮減清單或分批。'
+      : `無法編碼這份清單：${e.message}`);
+  }
+
+  const { levels } = evaluateFormulary(payload, cls.matched);
+  renderFxLevels(levels);
+  if (LEVEL_ORDER.every((lv) => !levels[lv].available)) {
+    show($('fxLinkBox'), false);
+    return fxErrorKeepResult('這份清單三個級別都組不出完整題卷，因此不產生連結。請增加品項後再試。');
+  }
+
+  const url = fxUrlFor(payload);
+  if (url.length > MAX_URL_LEN) {
+    show($('fxLinkBox'), false);
+    // **三個數字不是同一個**（依 codex-review CR-5）：使用者貼的是 `distinct` 筆相異字號，
+    // 真正撐大網址的是進 payload 的 `payloadIds`（命中 ∪ excluded 內的），
+    // 而 `matched` 只是其中可出題的那些。教學藥師是靠這行決定要縮減多少——
+    // 拿 matched 冒充清單總數，他會刪錯東西。
+    return fxErrorKeepResult(`清單 ${cls.distinct} 筆相異字號，其中 ${cls.payloadIds.length} 筆進入連結，`
+      + `產生的網址 ${url.length} 字元，超出可分享連結上限 ${MAX_URL_LEN} 字元。請縮減清單或分批。`);
+  }
+  $('fxLink').value = url;
+  show($('fxLinkBox'));
+  show($('fxCopied'), false);
+}
+
+/** 有分析結果、但不產連結的情形：數字照樣揭露，只是說明為什麼沒有連結 */
+function fxErrorKeepResult(msg) {
+  $('fxError').textContent = msg;
+  show($('fxError'));
+}
+
+/** 分享連結的基底：目前頁面去掉 query 與 fragment，只掛 `fx` */
+function fxUrlFor(payload) {
+  const u = new URL(window.location.href);
+  return `${u.origin}${u.pathname}?${FX_PARAM}=${payload}`;
+}
+
+function renderFxBreakdown(cls) {
+  show($('fxResult'));
+  $('fxSummary').innerHTML =
+    `<b>命中</b> <span class="num">${cls.matched.length}</span> 品項`
+    + ` ｜ <b>未命中</b> <span class="num">${cls.distinct - cls.matched.length}</span>`
+    + ` ｜ <b>相異字號</b> <span class="num">${cls.distinct}</span>`
+    + (cls.blank ? ` ｜ <b>空白列</b> <span class="num">${cls.blank}</span>（未計入任何類別）` : '');
+
+  // 全額揭露：**直接給各項數字**，不只列原因名稱（D37 的 v5.4 教訓）
+  $('fxBreakdown').innerHTML = [
+    { label: CATEGORY_LABEL[Category.MATCHED], n: cls.matched.length },
+    ...FX_CATS.map((c) => ({ label: CATEGORY_LABEL[c.code], n: cls[c.key].length })),
+  ].map((r) => `<div class="fx-row"><span class="k">${escapeHtml(r.label)}</span>`
+    + `<span class="v">${r.n}</span></div>`).join('');
+
+  // 未命中明細**只經 textContent**（D43）：這裡的字串來自使用者貼上的原始輸入，
+  // 未知前綴的 token 會原樣保留（C50 的惡意字串正是走這條路徑）
+  const lines = [];
+  for (const c of FX_CATS) for (const id of cls[c.key]) lines.push(`${c.code}\t${id}`);
+  $('fxUnlistedList').textContent = lines.length
+    ? lines.slice(0, FX_LIST_CAP).join('\n')
+      + (lines.length > FX_LIST_CAP ? `\n…共 ${lines.length} 筆，完整清單請下載` : '')
+    : '（沒有未命中的品項）';
+  show($('fxUnlistedList'), true);
+  $('btnFxDownload').disabled = lines.length === 0;
+}
+
+function renderFxLevels(levels) {
+  $('fxLevels').innerHTML = LEVEL_ORDER.map((lv) => {
+    const p = levels[lv];
+    const detail = p.available
+      ? `可出 <span class="v">${p.quizLen}</span> 題（可出題藥名 <span class="v">${p.K}</span> 個）`
+      : `不可用：${escapeHtml(p.code === 'K_BELOW_MIN'
+        ? `可出題藥名 ${p.K} 個，至少要 ${minUsableK(lv)} 個`
+        : p.reason ?? '組不出完整題卷')}`;
+    return `<div class="fx-lv${p.available ? '' : ' off'}"><b>${LEVELS[lv].badge}</b> ｜ ${detail}</div>`;
+  }).join('');
+}
+
+/** D43：下載內容是純文字，經 Blob 而不經任何 DOM sink */
+function downloadUnmatched() {
+  const cls = state.fxDraft;
+  if (!cls) return;
+  const head = [
+    '# 藥品辨識王 — 院內清單未命中明細',
+    `# 產生時間 ${new Date().toISOString()}`,
+    `# 題庫版本 ${state.pool?.meta?.source_version ?? '未知'}`,
+    `# 命中（可出題）${cls.matched.length} 筆，未列於本檔`,
+    '# 以下每行為「類別代碼<TAB>藥證字號」',
+    ...FX_CATS.map((c) => `#   ${c.code} = ${CATEGORY_LABEL[c.code]}`),
+  ];
+  const body = [];
+  for (const c of FX_CATS) for (const id of cls[c.key]) body.push(`${c.code}\t${id}`);
+  const blob = new Blob([[...head, ...body].join('\n') + '\n'], { type: 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `院內清單-未命中-${(state.pool?.meta?.source_version ?? 'unknown')}.txt`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
 // ── 難度選擇（規格 §6.1）─────────────────────────────────────────────
+
+/**
+ * 該級在目前模式下可否出題（D38）。
+ *
+ * 通用版恆可用（全庫的可用性由 C4 的載入檢查與 `startQuiz` 的失敗路徑處理）；
+ * 院內版一律以 **probe 的實際組卷結果**為準，**不看 `eligibleKeys().size`**。
+ */
+const levelOff = (id) => (state.fx ? !state.fx.levels[id].available : false);
+
+/** 禁用原因的使用者可讀說明。不含藥名（引擎的訊息帶藥名，不可直接顯示） */
+function levelOffReason(id) {
+  const p = state.fx?.levels[id];
+  if (!p || p.available) return '';
+  if (p.code === 'K_BELOW_MIN') {
+    return `這份清單在此級只有 ${p.K} 個可出題藥名，至少要 ${minUsableK(id)} 個`;
+  }
+  return `這份清單在此級組不出完整題卷（${p.reason ?? '原因不明'}）`;
+}
 
 function renderLevelPicker() {
   $('levelPick').innerHTML = LEVEL_ORDER.map((id) => {
     const L = LEVELS[id];
-    return `<button class="level" role="radio" aria-checked="false" data-level="${id}">
+    const off = levelOff(id);
+    // 禁用時**不用 hidden**（C45／M5 的 M-6 判準）：藏起來會讓人以為工具壞了。
+    // `disabled` 與 `aria-disabled` 都給——前者擋滑鼠、後者讓輔助技術讀得到狀態
+    return `<button class="level" role="radio" aria-checked="false" data-level="${id}"${
+      off ? ' disabled aria-disabled="true"' : ''}>
       <span class="lv-name">${L.name}</span>
       <span class="lv-desc">${L.desc}</span>
-      <span class="lv-meta">${L.meta}</span>
+      <span class="lv-meta">${L.meta}</span>${
+      state.fx ? `<span class="lv-meta">院內可出題 ${state.fx.levels[id].K} 個藥名</span>` : ''}${
+      off ? `<span class="lv-off">暫不可用：${escapeHtml(levelOffReason(id))}</span>` : ''}
     </button>`;
   }).join('');
   $('levelPick').querySelectorAll('.level').forEach((el) => {
@@ -371,22 +904,36 @@ function resetLevel() {
   state.level = null;
   $('levelPick').querySelectorAll('.level').forEach((el) => {
     el.setAttribute('aria-checked', 'false');
-    el.disabled = false;
+    // 禁用狀態**不因重設而解除**：它是清單撐不撐得起這一級的性質，
+    // 與「這一回合選了誰」無關（C45）
+    el.disabled = levelOff(el.dataset.level);
   });
   show($('levelWarn'), false);
   $('btnStart').disabled = true;
   $('btnStart').textContent = '請先選擇難度';
 }
 
+/**
+ * C45：禁用的級別必須是**程式化 no-op**——
+ * `disabled` 只擋得住滑鼠，鍵盤、輔助技術與程式呼叫都繞得過去。
+ * 這裡是真正的守門：不改 level、不寫 storage、不啟動任何預載。
+ */
 function selectLevel(id) {
   if (!LEVELS[id]) return;
+  if (levelOff(id)) {
+    $('levelWarn').textContent = `${LEVELS[id].badge}目前不可用：${levelOffReason(id)}。`;
+    show($('levelWarn'));
+    return;
+  }
   state.level = id;
   $('levelPick').querySelectorAll('.level').forEach((el) => {
     el.setAttribute('aria-checked', String(el.dataset.level === id));
   });
   show($('levelWarn'), false);
   $('btnStart').disabled = false;
-  $('btnStart').textContent = `開始 ${QUIZ_SIZE} 題測驗（${LEVELS[id].name}）`;
+  // 院內版可能是短卷（D39）：按鈕上寫 20 題卻只出 11 題，是宣稱與交付不符
+  const n = state.fx ? state.fx.levels[id].quizLen : QUIZ_SIZE;
+  $('btnStart').textContent = `開始 ${n} 題測驗（${LEVELS[id].name}）`;
 }
 
 /**
@@ -429,33 +976,71 @@ function startQuiz() {
   // 「下一回合的成績卡印上一回合的分數」這條路徑重新打開。
   clearRetryState();
 
-  try {
-    state.questions = drawLeveledQuiz(state.pool.items, {
-      level, n: QUIZ_SIZE, rng: Math.random,
-      index: state.index, eligible: eligibleFor(level),
-    });
-  } catch (e) {
-    if (e.code === 'INSUFFICIENT_KEYS') {
-      return fatal(`${LEVELS[level].badge}可用答案鍵僅 ${e.available} 個，`
-        + `不足 ${e.required ?? QUIZ_SIZE} 個，無法出 ${QUIZ_SIZE} 題。`);
+  // C45 的第二道：入口被程式化呼叫時也不得出題
+  if (levelOff(level)) {
+    $('levelWarn').textContent = `${LEVELS[level].badge}目前不可用：${levelOffReason(level)}。`;
+    show($('levelWarn'));
+    return;
+  }
+
+  /**
+   * D38.3：**probe 成功時產生的那一卷就是這一卷**，按下開始不得重抽。
+   *
+   * 重抽會讓 D38 的判定作廢——「檢查時可用、按下去失敗」正是那條規定要防的。
+   * 只用一次：用掉之後同一 session 的下一回合正常隨機抽（否則每回合都同一份題目）。
+   */
+  const probe = state.fx?.levels[level];
+  if (probe?.quiz) {
+    state.questions = probe.quiz;
+    probe.quiz = null;
+  } else {
+    const n = state.fx ? probe.quizLen : QUIZ_SIZE;
+    try {
+      state.questions = drawLeveledQuiz(state.items, {
+        level, n, rng: Math.random,
+        index: state.index, eligible: eligibleFor(level),
+      });
+    } catch (e) {
+      /**
+       * **院內版的重抽失敗是可預期的隨機結果，不是致命錯誤。**
+       *
+       * 第一回合有 D38.3 的 probe 產物護著，第二回合起走的是 `Math.random`——
+       * 而 `drawLeveledQuiz` 是有限重試（3 次）的隨機貪婪組卷。
+       * 實測一份 30 品項的清單（probe 判定 L1 可用、K=29）：**200 次重抽失敗 105 次**。
+       *
+       * 走 `fatal()` 會把起始頁與答題頁全部藏起來，只剩「無法開始測驗」，
+       * 使用者非重新整理不可——對一個「再按一次很可能就成功」的情況，那是災難性的處置。
+       * 退回起始頁說明原因即可，`state.level` 還在，再按一次就重抽。
+       */
+      if (state.fx && (e.code === 'QUIZ_ASSEMBLY_FAILED' || e.code === 'INSUFFICIENT_KEYS')) {
+        $('levelWarn').textContent = `這一級這次沒能組出題卷（院內清單品項偏少時會發生）。`
+          + '請再按一次開始，或改選其他級別。';
+        show($('levelWarn'));
+        return;
+      }
+      if (e.code === 'INSUFFICIENT_KEYS') {
+        return fatal(`${LEVELS[level].badge}可用答案鍵僅 ${e.available} 個，`
+          + `不足 ${e.required ?? n} 個，無法出 ${n} 題。`);
+      }
+      if (e.code === 'INVARIANT_VIOLATED') {
+        // 生成路徑違規是程式 bug，不是題庫問題——不要建議使用者改選難度
+        return fatal('題卷未通過不變量驗證，已中止以免出到不可解或會洩題的題目。'
+          + `<br>違規項目：${escapeHtml(violationCodes(e.violations))}`
+          + '<br>詳細診斷已輸出至瀏覽器主控台，請連同該內容回報。');
+      }
+      if (e.code === 'QUIZ_ASSEMBLY_FAILED') {
+        return fatal('無法組出符合條件的題卷（誘答條件過嚴或題庫多樣性不足），已中止。'
+          + '<br>請改選其他難度，或回報此問題。');
+      }
+      return fatal(`出題失敗：${e.message}`);
     }
-    if (e.code === 'INVARIANT_VIOLATED') {
-      // 生成路徑違規是程式 bug，不是題庫問題——不要建議使用者改選難度
-      return fatal('題卷未通過不變量驗證，已中止以免出到不可解或會洩題的題目。'
-        + `<br>違規項目：${escapeHtml(violationCodes(e.violations))}`
-        + '<br>詳細診斷已輸出至瀏覽器主控台，請連同該內容回報。');
-    }
-    if (e.code === 'QUIZ_ASSEMBLY_FAILED') {
-      return fatal('無法組出符合條件的題卷（誘答條件過嚴或題庫多樣性不足），已中止。'
-        + '<br>請改選其他難度，或回報此問題。');
-    }
-    return fatal(`出題失敗：${e.message}`);
   }
 
   state.quizLevel = level;
   state.idx = 0;
   state.voided = 0;
   state.nextToken = state.questions.length + 1;
+  renderFxCoverage('quiz', level);          // C43：答題頁的 N 與 K
   show($('start'), false);
   show($('result'), false);
   show($('quiz'));
@@ -909,13 +1494,13 @@ function next() {
 
 /** 外觀重複索引建一次就好（3,913 筆掃描，別每疊重算） */
 function lookAlikeIndex() {
-  if (!state.lookAlike) state.lookAlike = buildLookAlikeIndex(state.pool.items);
+  if (!state.lookAlike) state.lookAlike = buildLookAlikeIndex(state.items);
   return state.lookAlike;
 }
 
 function startFlash() {
   try {
-    state.deck = drawDeck(state.pool.items, {
+    state.deck = drawDeck(state.items, {
       n: DECK_SIZE, rng: Math.random, startToken: state.fNextToken,
     });
   } catch (e) {
@@ -1137,7 +1722,10 @@ function quitFlash() {
  * 返回原成績時重走 `renderResult()` 但不寫，否則每次返回都會重跑一次寫入判定。
  */
 function finish() {
-  renderResult({ record: state.mode !== 'retry' });
+  // D40：**院內版完全不寫任何最佳紀錄**，只顯示當回合分數。
+  // 不同醫院的清單共用同一 key、換清單前後基準不同、月更縮水後基準又變——
+  // 三個問題疊起來讓那個數字沒有任何可比較的意義。
+  renderResult({ record: state.mode !== 'retry' && !state.fx });
 }
 
 /**
@@ -1154,6 +1742,8 @@ function renderResult({ record }) {
   const cfg = LEVELS[state.quizLevel ?? Level.L3];
   show($('quiz'), false);
   show($('result'));
+
+  renderFxCoverage('result', state.quizLevel ?? Level.L3);   // C43：結算頁也要有
 
   // ── D29：複習卷的分母不是 20、題目不是隨機抽樣，任何跨回合可比較的數字都不適用
   $('resultTitle').textContent = retry ? '錯題複習結果' : '測驗結果';
@@ -1377,7 +1967,7 @@ function startRetry() {
   state.retryBuilding = true;
   let quiz;
   try {
-    quiz = drawRetryQuiz(state.pool.items, {
+    quiz = drawRetryQuiz(state.items, {
       level,
       ansKeys,
       rng: Math.random,
@@ -1542,7 +2132,17 @@ async function downloadCard() {
   const stamp = new Date().toLocaleString('zh-TW', { hour12: false });
   g.fillText(`測驗時間 ${stamp}`, 52, y + 24);
   const ver = state.pool?.meta?.source_version;
-  g.fillText(`題庫 ${state.pool.meta.count.toLocaleString()} 題${ver ? `　·　資料版本 ${ver}` : ''}`, 52, y + 42);
+  /**
+   * **院內版的母體不是全庫。**
+   *
+   * 成績卡是新人會截圖給帶教藥師看的東西，印「題庫 3,941 題」等於宣稱這一卷抽自全庫，
+   * 而它其實只抽自院內清單的 N 個品項——分數的意義完全不同。
+   * 這與 D34.1「全額揭露」是同一條理由：使用者拿數字做判斷，數字就不能是別人的。
+   */
+  const scope = state.fx
+    ? `院內清單 ${state.fx.N.toLocaleString()} 品項`
+    : `題庫 ${state.pool.meta.count.toLocaleString()} 題`;
+  g.fillText(`${scope}${ver ? `　·　資料版本 ${ver}` : ''}`, 52, y + 42);
   g.fillStyle = T.no; g.font = sans(400, 10.5);
   g.fillText('本工具為教育練習用，非臨床調劑或給藥的辨識依據。分數不可跨難度比較。', 52, y + 64);
 
@@ -1581,6 +2181,7 @@ function escapeHtml(s) {
 
 function backToStart() {
   clearRetryState();            // D31：離開結算頁就不該再有 retry 殘留
+  show($('formulary'), false);
   show($('result'), false);
   show($('quiz'), false);
   show($('flash'), false);
@@ -1620,6 +2221,24 @@ $('btnFlashStop').addEventListener('click', () => {
 });
 $('btnToQuiz').addEventListener('click', backToStart);
 $('btnFlashAgain').addEventListener('click', startFlash);
+
+// V5 產連結頁
+$('btnFormulary').addEventListener('click', openFormularyPage);
+$('btnFxBack').addEventListener('click', closeFormularyPage);
+$('btnFxAnalyze').addEventListener('click', analyzeFormulary);
+$('btnFxDownload').addEventListener('click', downloadUnmatched);
+$('btnFxCopy').addEventListener('click', () => {
+  // 複製失敗不得宣稱成功——使用者會以為連結在剪貼簿裡而貼出空白
+  const done = () => { show($('fxCopied')); };
+  try {
+    const p = navigator.clipboard?.writeText($('fxLink').value);
+    if (p?.then) p.then(done, () => { $('fxCopied').textContent = '複製失敗，請手動選取'; show($('fxCopied')); });
+    else done();
+  } catch {
+    $('fxCopied').textContent = '複製失敗，請手動選取';
+    show($('fxCopied'));
+  }
+});
 
 // 清除紀錄：二次確認走頁內元素而不是 window.confirm——
 // 瀏覽器 modal 會阻斷整個頁面，而且取消路徑無從自動驗證（E7 要求取消時零 mutation）

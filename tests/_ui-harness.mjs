@@ -54,6 +54,74 @@ export const storeControl = {
   mutations() { return this.calls.filter((c) => c.op !== 'getItem'); },
 };
 
+/**
+ * 網址與 history 的控制盤（V5 C49）。
+ *
+ * `replaced` 記錄每一次 `history.replaceState` 的目標網址——
+ * C49 要驗「**只**移除 `fx`，其餘 query 與 fragment 精確保留」，
+ * 只比對最終 `href` 看不出「整段 query string 被砍掉再重建」這種實作。
+ */
+export const urlControl = {
+  href: 'https://example.test/quiz/',
+  replaced: [],
+  throwOnReplace: null,
+  reset(href = 'https://example.test/quiz/') {
+    this.href = href;
+    this.replaced.length = 0;
+    this.throwOnReplace = null;
+  },
+};
+
+/**
+ * fetch 的控制盤（V5 D47）。預設從磁碟讀真檔；
+ * `fail` 內的路徑回非 200，`bad` 內的路徑回壞 JSON，`body` 可整份替換內容。
+ */
+export const fetchControl = {
+  fail: new Set(),
+  bad: new Set(),
+  body: new Map(),
+  urls: [],
+  /**
+   * `defer` 內的路徑不會自己完成——每次請求會把一個 `{resolve, reject}` 推進 `pending`，
+   * 由測試決定誰先誰後（D46 的競態沒有這個就寫不出來，見 codex-review TG-2）。
+   */
+  defer: new Set(),
+  pending: [],
+  reset() {
+    this.fail.clear(); this.bad.clear(); this.body.clear();
+    this.defer.clear(); this.pending.length = 0; this.urls.length = 0;
+  },
+};
+
+/**
+ * **DOM sink 清冊**（C50）。零依賴樁能監控的每一種寫入 DOM 的途徑都要在這裡登記，
+ * 否則「零 sink 呼叫」可能只是因為那條路徑根本沒被監控。
+ *
+ * 每一種都必須有反向 sentinel 證明它真的會觸發——見 `formulary-ui.test.mjs`。
+ */
+export const sinkLog = {
+  calls: [],            // {sink, id, value}
+  /**
+   * **明列的排除項**（依 codex-review TG-6）。清冊的原意是「不得默默漏列」，
+   * 不是「什麼都要監控」——排除的每一項都要說得出為什麼。
+   *
+   * - `disabled`：布林狀態，不承載字串，注入不了東西
+   * - `style.width`：只由 `${百分比}%` 這種算出來的數值字串寫入，不接受使用者輸入
+   * - `classList`：只吃程式碼裡的固定字面值
+   */
+  excluded: Object.freeze({
+    disabled: '布林狀態，不承載字串',
+    'style.width': '只寫入算出來的百分比，不接受使用者輸入',
+    classList: '只吃固定字面值',
+  }),
+  reset() { this.calls.length = 0; },
+  /** 某段文字是否經由**非純文字** sink 進入 DOM */
+  taintedBy(needle) {
+    return this.calls.filter((c) => c.sink !== 'textContent' && String(c.value).includes(needle));
+  },
+  ofSink(sink) { return this.calls.filter((c) => c.sink === sink); },
+};
+
 const localStorageStub = {
   getItem(k) {
     storeControl.calls.push({ op: 'getItem', key: k });
@@ -82,8 +150,8 @@ class El {
     this.tagName = tag.toUpperCase();
     this._html = '';
     this._attrs = {};
-    this.textContent = '';
-    this.value = '';
+    this._text = '';
+    this._value = '';
     this.className = '';
     this.disabled = false;
     this.style = {};
@@ -105,7 +173,45 @@ class El {
     };
   }
 
+  /**
+   * 純文字 sink：C50 允許的唯一一條路徑。
+   *
+   * **刻意不做 `String()` 轉型**：真實 DOM 會轉，但既有測試以 `assert/strict`
+   * 比對數字（`assert.equal(el.textContent, 20)`），轉型會讓那些斷言全部改判。
+   * 這一層只負責記錄，不改變既有語意。
+   */
+  set textContent(v) {
+    sinkLog.calls.push({ sink: 'textContent', id: this.id, value: String(v ?? '') });
+    this._text = v;
+  }
+
+  get textContent() { return this._text; }
+
+  /** property assignment sink（C50 明列的一類，依 codex-review TG-6 補上） */
+  set value(v) {
+    sinkLog.calls.push({ sink: 'value', id: this.id, value: String(v ?? '') });
+    this._value = v;
+  }
+
+  get value() { return this._value; }
+
+  set alt(v) {
+    sinkLog.calls.push({ sink: 'alt', id: this.id, value: String(v ?? '') });
+    this._attrs.alt = v;
+  }
+
+  get alt() { return this._attrs.alt ?? ''; }
+
+  set outerHTML(v) {
+    sinkLog.calls.push({ sink: 'outerHTML', id: this.id, value: String(v ?? '') });
+  }
+
+  insertAdjacentHTML(pos, html) {
+    sinkLog.calls.push({ sink: 'insertAdjacentHTML', id: this.id, value: String(html ?? '') });
+  }
+
   set innerHTML(v) {
+    sinkLog.calls.push({ sink: 'innerHTML', id: this.id, value: String(v ?? '') });
     this._html = v;
     this._children = [];
     this._appended = [];
@@ -140,7 +246,10 @@ class El {
     return this.querySelectorAll(sel)[0] ?? null;
   }
   appendChild(el) { this._appended.push(el); return el; }
-  setAttribute(k, v) { this._attrs[k] = v; }
+  setAttribute(k, v) {
+    sinkLog.calls.push({ sink: `setAttribute:${k}`, id: this.id, value: String(v ?? '') });
+    this._attrs[k] = v;
+  }
   getAttribute(k) { return this._attrs[k]; }
   removeAttribute(k) { delete this._attrs[k]; }
   focus() {}
@@ -160,6 +269,7 @@ class ImgEl extends El {
   constructor(id) { super(id, 'img'); this.naturalWidth = 0; }
 
   set src(v) {
+    sinkLog.calls.push({ sink: 'img.src', id: this.id, value: String(v ?? '') });
     this._attrs.src = v;
     queueMicrotask(() => {
       if (this._attrs.src !== v) return;             // 期間已被換掉
@@ -216,17 +326,44 @@ export function installDom() {
   // M5 的 L2 發布前預載（D28.1）建的是**未掛進 DOM** 的 img 節點，
   // 若樁回傳不會 settle 的 El，預載的 Promise 永遠不 resolve，
   // L2 的複習卷就再也發布不出來，而測試只會看到逾時
+  const downloads = [];
   let created = 0;
   globalThis.document = {
     getElementById: get,
     createElement: (tag) => {
-      if (tag === 'a') return { click() {}, set href(v) {}, set download(v) {} };
+      // 下載用的 <a>：href 是 URL sink，一併登記（C50 的 sink 清冊）
+      if (tag === 'a') {
+        const rec = { name: null, clicked: 0 };
+        downloads.push(rec);
+        return {
+          click() { rec.clicked++; },
+          set href(v) { sinkLog.calls.push({ sink: 'a.href', id: 'download', value: String(v) }); rec.href = v; },
+          get href() { return rec.href; },
+          set download(v) { sinkLog.calls.push({ sink: 'a.download', id: 'download', value: String(v) }); rec.name = v; },
+        };
+      }
       if (tag === 'img') return new ImgEl(`created-img#${created++}`);
       return new El(`created-${tag}`, tag);
     },
     fonts: { ready: Promise.resolve() },
   };
-  globalThis.window = { scrollTo() {} };
+  globalThis.window = {
+    scrollTo() {},
+    get location() { return { href: urlControl.href }; },
+    history: {
+      replaceState(_s, _t, url) {
+        if (urlControl.throwOnReplace) throw urlControl.throwOnReplace;
+        urlControl.replaced.push(String(url));
+        // 真實瀏覽器會就地改寫網址列；樁也要改，否則第二次 cleanup 的冪等驗不到
+        urlControl.href = new URL(String(url), urlControl.href).href;
+      },
+    },
+  };
+  // Node 24 的全域 `navigator` 只有 getter，直接指派會 TypeError
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    get: () => ({ clipboard: { writeText: async () => {} } }),
+  });
   // 用 getter 而不是直接指派：E1（不存在）與「存取 property 本身就拋」
   // 兩種失效都必須測得到，而那兩種在真實瀏覽器都發生在**還沒呼叫任何方法**之前
   Object.defineProperty(globalThis, 'localStorage', {
@@ -236,20 +373,46 @@ export function installDom() {
       return storeControl.absent ? undefined : localStorageStub;
     },
   });
-  globalThis.URL.createObjectURL = () => 'blob:stub';
+  const blobs = [];
+  globalThis.URL.createObjectURL = (b) => { blobs.push(b); return 'blob:stub'; };
   globalThis.URL.revokeObjectURL = () => {};
-  globalThis.fetch = async (u) => ({
-    ok: true,
-    status: 200,
-    json: async () => JSON.parse(fs.readFileSync(path.join(ROOT, 'data', u.replace('data/', '')), 'utf8')),
-  });
+  globalThis.fetch = async (u) => {
+    fetchControl.urls.push(u);
+    const name = String(u).replace('data/', '');
+    if (fetchControl.defer.has(name)) {
+      return new Promise((resolve, reject) => {
+        fetchControl.pending.push({
+          name,
+          ok: (body) => resolve({ ok: true, status: 200, json: async () => body }),
+          fail: (msg = 'network down') => reject(new Error(msg)),
+        });
+      });
+    }
+    if (fetchControl.fail.has(name)) return { ok: false, status: 503, json: async () => ({}) };
+    if (fetchControl.bad.has(name)) {
+      return { ok: true, status: 200, json: async () => { throw new SyntaxError('bad json'); } };
+    }
+    if (fetchControl.body.has(name)) {
+      return { ok: true, status: 200, json: async () => fetchControl.body.get(name) };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => JSON.parse(fs.readFileSync(path.join(ROOT, 'data', name), 'utf8')),
+    };
+  };
 
   return {
     $: get,
     drawn,
     drawnImages,
+    downloads,
+    blobs,
     img: imgControl,
     store: storeControl,
+    url: urlControl,
+    net: fetchControl,
+    sinks: sinkLog,
     hidden: (id) => get(id).classList.contains('hidden'),
     cells: () => get('qGrid').querySelectorAll('.cell'),
     /** 讓所有已排定的 microtask 跑完 */
