@@ -151,7 +151,7 @@ describe('C31 每批交付無條件升 CACHE 版本', () => {
     //       「這批沒新增資源所以不用升」的判斷不留給下一個人
     const m = /const CACHE = '([^']+)'/.exec(src);
     assert.ok(m, 'sw.js 必須有 const CACHE');
-    assert.equal(m[1], 'tfda-drug-id-quiz-v4', '本批（批次 B／M5 錯題再戰）必須升到 v4');
+    assert.equal(m[1], 'tfda-drug-id-quiz-v5', '本批（V5 批次 4 院內清單 UI）必須升到 v5');
   });
 
   test('〔v4.5〕cache 名稱由 install 實際使用的值取證，不只比對原始碼常數', async () => {
@@ -160,7 +160,7 @@ describe('C31 每批交付無條件升 CACHE 版本', () => {
     let done;
     listeners.install({ waitUntil: (p) => { done = p; } });
     await done;
-    assert.deepEqual(opened, ['tfda-drug-id-quiz-v4'],
+    assert.deepEqual(opened, ['tfda-drug-id-quiz-v5'],
       `install 實際開啟的 cache 名稱是 ${JSON.stringify(opened)}`);
   });
 

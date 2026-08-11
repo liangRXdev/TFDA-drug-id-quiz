@@ -209,6 +209,49 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .rec-note { font-size: 0.72rem; color: var(--text-muted); margin: 0.5rem 0 0; }
 .rec-flash { font-size: 0.78rem; color: var(--accent); font-weight: 500; margin: 0.6rem 0 0; }
 
+/* 院內清單（規格 V5）。
+   刻意用 muted：涵蓋範圍是限制說明，不是成就標章——
+   強調它會讓「另有 N 筆不在資料集中」這個提醒被當成裝飾略過（D34.1 的全額揭露）。 */
+.fx-note { font-size: 0.72rem; color: var(--text-muted); margin: 0.6rem 0 0; line-height: 1.6; }
+.fx-note .n { font-family: var(--mono); color: var(--text-primary); font-weight: 700; }
+.fx-warn { font-size: 0.72rem; color: var(--warning); margin: 0.4rem 0 0; line-height: 1.6; }
+.fx-error { font-size: 0.78rem; color: var(--danger); margin: 0.8rem 0 0; line-height: 1.6; }
+textarea {
+  width: 100%; box-sizing: border-box; margin-top: 0.8rem; resize: vertical;
+  font-family: var(--mono); font-size: 0.85rem; line-height: 1.6;
+  padding: 0.55rem 0.7rem; border: 1px solid var(--border); border-radius: 6px;
+  background: #fff; color: var(--text-primary);
+}
+textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-light); }
+.fx-csv { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin-top: 0.7rem; font-size: 0.75rem; color: var(--text-muted); }
+.fx-csv select, .fx-csv input[type=number] {
+  font-family: inherit; font-size: 0.75rem; padding: 0.3rem 0.4rem;
+  border: 1px solid var(--border); border-radius: 4px; background: #fff; color: var(--text-primary);
+}
+.fx-csv input[type=number] { width: 4rem; }
+.fx-result { margin-top: 1rem; }
+.fx-breakdown { margin-top: 0.7rem; border: 1px dashed var(--border); border-radius: 6px; padding: 0.6rem 0.75rem; }
+.fx-row { display: flex; flex-wrap: wrap; gap: 0.5rem; font-size: 0.74rem; color: var(--text-muted); padding: 0.2rem 0; }
+.fx-row .k { flex: 1 1 60%; }
+.fx-row .v { font-family: var(--mono); color: var(--text-primary); font-weight: 700; }
+.fx-list {
+  margin-top: 0.6rem; max-height: 12rem; overflow: auto; white-space: pre-wrap; word-break: break-all;
+  font-family: var(--mono); font-size: 0.72rem; color: var(--text-muted);
+  border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem 0.7rem; background: #fff;
+}
+.fx-levels { margin-top: 0.9rem; display: grid; gap: 0.5rem; }
+.fx-lv { font-size: 0.75rem; border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem 0.7rem; }
+.fx-lv .v { font-family: var(--mono); color: var(--text-primary); font-weight: 700; }
+.fx-lv.off { color: var(--text-muted); border-style: dashed; }
+.fx-link { margin-top: 0.9rem; }
+.fx-link-label { display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.3rem; }
+.fx-link input[type=text] { width: 100%; box-sizing: border-box; text-transform: none; font-size: 0.8rem; }
+.fx-copied { font-size: 0.75rem; color: var(--accent); }
+/* 禁用的級別：**看得見、說得出原因、按不動**（C45）。
+   不用 hidden——藏起來會讓教學藥師以為工具壞了，而不是清單撐不起那一級 */
+.level[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; }
+.lv-off { display: block; font-size: 0.68rem; color: var(--warning); margin-top: 0.25rem; }
+
 /* 錯題再戰（規格 v4 D29／D33）。
    刻意用 muted 而非 accent：複習不是成就，強調它會反過來讓「不計入紀錄」被略過 */
 .retry-tag {
@@ -356,6 +399,12 @@ input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow:
     </div>
     <p class="rec-note hidden" id="recordsNote"></p>
 
+    <!-- 院內版狀態（規格 V5 D34.1／C43）。通用版時整塊隱藏。
+         N（命中品項）與 K（該級可出題藥名）是兩個數字，K 印在各級別卡上 -->
+    <p class="fx-note hidden" id="startFxNote">院內版 ｜ 命中 <span class="n" id="sFxN">0</span>
+      品項<span id="sFxUnlisted"></span>｜院內版只顯示當回合分數，不計入最佳紀錄</p>
+    <p class="fx-warn hidden" id="startFxWarn"></p>
+
     <div class="test-info" id="poolInfo" style="margin-top:0.9rem"></div>
     <div class="btn-row">
       <button id="btnStart" disabled>請先選擇難度</button>
@@ -364,6 +413,66 @@ input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow:
     <p class="hint" style="margin:0.7rem 0 0">
       閃卡模式不需選難度：只看圖，翻開後顯示藥名，不作答、不計分。適合測驗前先熟悉外觀。
     </p>
+    <div class="btn-row">
+      <button id="btnFormulary" class="ghost">教學藥師：產生院內清單連結</button>
+    </div>
+  </section>
+
+  <!-- 產生院內清單連結（教學藥師端，規格 V5 §5.2） -->
+  <section id="formulary" class="card hidden">
+    <h2><span class="step-num">＋</span>產生院內清單連結</h2>
+    <p class="hint">
+      貼上院內藥品的<b>許可證字號</b>，每行一個。只比對字號本身，
+      <b>不上傳任何資料</b>——清單完全編碼在產出的網址裡。
+    </p>
+
+    <textarea id="fxInput" rows="8" spellcheck="false"
+      placeholder="衛署藥製字第020174號&#10;衛部藥輸字第026789號"></textarea>
+
+    <div class="fx-csv">
+      <label>分隔符
+        <select id="fxDelim">
+          <option value="">（不分欄：每行一個字號）</option>
+          <option value=",">逗號 ,</option>
+          <option value=";">分號 ;</option>
+          <option value="&#9;">Tab</option>
+          <option value="，">全形逗號 ，</option>
+        </select>
+      </label>
+      <label>取第 <input type="number" id="fxColumn" min="1" step="1" value="1"> 欄</label>
+      <label><input type="checkbox" id="fxHeader"> 第一列是標題列</label>
+    </div>
+    <p class="hint" style="margin:0.5rem 0 0">
+      從 Excel 貼上多欄資料時，必須自己指定分隔符與欄位——猜錯欄位會靜默產出一份錯誤的清單。
+    </p>
+
+    <div class="btn-row">
+      <button id="btnFxAnalyze">分析清單</button>
+      <button id="btnFxBack" class="ghost">返回</button>
+    </div>
+
+    <p class="fx-error hidden" id="fxError"></p>
+
+    <div class="fx-result hidden" id="fxResult">
+      <div class="test-info" id="fxSummary"></div>
+      <div class="fx-breakdown" id="fxBreakdown"></div>
+      <!-- 未命中明細只經 textContent（D43）。畫面只列前幾筆，完整清單走下載 -->
+      <div class="fx-list hidden" id="fxUnlistedList"></div>
+      <div class="btn-row">
+        <button id="btnFxDownload" class="ghost">下載未命中清單（純文字）</button>
+      </div>
+
+      <div class="fx-levels" id="fxLevels"></div>
+
+      <div class="fx-link hidden" id="fxLinkBox">
+        <label class="fx-link-label" for="fxLink">可分享連結</label>
+        <input type="text" id="fxLink" readonly>
+        <div class="btn-row">
+          <button id="btnFxCopy" class="ghost">複製連結</button>
+          <span class="fx-copied hidden" id="fxCopied">已複製</span>
+        </div>
+      </div>
+    </div>
   </section>
 
   <!-- 作答 -->
@@ -376,6 +485,10 @@ input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow:
       <span>目前得分 <span class="n" id="qScore">0</span></span>
     </div>
     <div class="bar"><i id="qBar"></i></div>
+
+    <!-- 院內版涵蓋範圍（C43）。N 與 K 是兩個不同的數字，不得互相冒充 -->
+    <p class="fx-note hidden" id="qFxNote">院內版 ｜ 命中 <span class="n" id="qFxN">0</span> 品項
+      ｜ 本級可出題 <span class="n" id="qFxK">0</span> 個藥名<span id="qFxUnlisted"></span></p>
 
     <!-- L1/L3：看圖辨識 -->
     <div class="q-img-wrap" id="qImgWrap"><img id="qImg" class="q-img" alt="藥品外觀實拍圖"></div>
@@ -419,6 +532,9 @@ input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow:
     <h2><span class="step-num">✓</span><span id="resultTitle">測驗結果</span> <span class="badge" id="resultBadge"></span></h2>
     <!-- 錯題複習的模式標示（D29／D33）。與 resultSub 分開：這句話在複習模式必須存在 -->
     <p class="retry-note hidden" id="retryNote">錯題複習（不計入紀錄）</p>
+    <!-- 院內版涵蓋範圍（C43）。答題頁與結算頁**都**要有 -->
+    <p class="fx-note hidden" id="resultFxNote">院內版 ｜ 命中 <span class="n" id="rFxN">0</span> 品項
+      ｜ 本級可出題 <span class="n" id="rFxK">0</span> 個藥名<span id="rFxUnlisted"></span></p>
     <p class="hint" id="resultSub"></p>
     <div class="results" id="resultMetrics"></div>
 
