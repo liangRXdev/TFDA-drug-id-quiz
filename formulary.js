@@ -693,8 +693,10 @@ export function formularySeed(payload, level) {
  * 是架上同時存在的兩顆藥。因此本函式回傳的 `index` 是**只含子集**的索引，
  * 出題路徑一律走它，全庫索引不得洩漏進來。
  *
- * D41：`missing` 是清單中已不在最新資料的 id。**呼叫端不得用它覆寫持久化的 payload**
- * ——覆寫會讓品項日後重新出現時也回不來。
+ * D41：`missing` 是 payload 中**不在當前 `pool.json`** 的 id。
+ * **它不等於「已不在最新資料中」**——payload 依 D34.1 同時帶 `excluded.json` 的 id，
+ * 那些本來就不在 pool 裡。要分辨兩者得再過一次 `splitMissing()`。
+ * **呼叫端不得用它覆寫持久化的 payload**——覆寫會讓品項日後重新出現時也回不來。
  *
  * @param {object[]} poolItems 當前 `pool.json` 的 `items`（全庫）
  * @param {Iterable<string>} matchedIds 清單解出的 canonical id
@@ -711,6 +713,33 @@ export function prepareFormulary(poolItems, matchedIds) {
     N: items.length,
     missing: [...want].filter((id) => !present.has(id)).sort(byCodePoint),
   };
+}
+
+/**
+ * D41（v5.11 修正）：把 `prepareFormulary().missing` 拆成兩種**後果完全不同**的情形。
+ *
+ * `missing` 是「payload 有、`pool.json` 沒有」。v5.3 寫 D41 時 payload 只帶命中的 id，
+ * 那時 `missing` 確實等於「已不在最新資料中」。**v5.4 讓 payload 依 D34.1 同時帶
+ * `excluded.json` 的 id**（為了品項日後回到 pool 時能自動恢復）——從那一刻起，
+ * `missing` 就恆含那些「一直都在資料集裡、只是不出題」的品項，而 D41 的措辭沒跟著改。
+ * 結果是任何含針劑以外之非固體口服或低品質品項的真實清單，載入時都會看到一句
+ * 「N 個品項已不在最新資料中」，而那 N 個一個都沒消失。
+ *
+ * 這是「規格改了一半」的典型：D34.1 動了 payload 的內容，
+ * D41 對 payload 內容的假設沒有人回來重新檢查。
+ *
+ * @param {Iterable<string>} missing `prepareFormulary()` 的 missing
+ * @param {Map<string, string>|null} excludedStages `buildExcludedIndex()` 的產物；
+ *   **`null` 代表還分辨不出來**，呼叫端此時只能講兩者都成立的弱敘述
+ * @returns {{excluded: string[], absent: string[]}|null}
+ *   `excluded` 在資料集中但不出題；`absent` 真的已不在最新資料中
+ */
+export function splitMissing(missing, excludedStages) {
+  if (!excludedStages) return null;
+  const excluded = [];
+  const absent = [];
+  for (const id of missing) (excludedStages.has(id) ? excluded : absent).push(id);
+  return { excluded, absent };
 }
 
 /**

@@ -537,6 +537,119 @@ describe('C44 降級不覆寫原始清單', () => {
 });
 
 // ════════════════════════════════════════════════════════════════════
+describe('C44.1 D41 只對「真的消失」示警（v5.11）', () => {
+  /**
+   * 這組守的是一個**規格只改了一半**造成的假警報。
+   *
+   * D41（v5.3）寫「missing ＝ 已不在最新資料中」時，payload 只帶命中的 id。
+   * D34.1（v5.4）讓 payload 同時帶 `excluded.json` 的 id ——從那一刻起 missing
+   * 恆含「一直都在資料集裡、只是不出題」的品項，而 D41 的措辭沒有人回來改。
+   * 實測：994 個藥證的真實院內清單，載入時會看到「156 個品項已不在最新資料中」，
+   * 而那 156 個一個都沒消失（55 非固體口服 ＋ 101 題目品質不足）。
+   *
+   * 對真實清單恆亮的警告，一個月後就沒有人讀了——那正是 D41 自己要防的事。
+   */
+
+  /** 從 `excluded.json` 決定性取 n 個 id（它們**在資料集中，但不在 pool**） */
+  function pickExcludedIds(n, seed) {
+    const rng = makeRng(seed);
+    const ids = EXCLUDED.items.map((it) => it.id);
+    for (let i = 0; i < n; i++) {
+      const j = i + Math.floor(rng() * (ids.length - i));
+      [ids[i], ids[j]] = [ids[j], ids[i]];
+    }
+    return ids.slice(0, n).sort();
+  }
+
+  test('payload 帶 excluded 的 id：不得說「已不在最新資料中」', async () => {
+    needPool();
+    const inPool = pickIds(300, 6101);
+    const inExcluded = pickExcludedIds(40, 6102);
+    assert.equal(inExcluded.length, 40, '前置條件：excluded.json 要取得到 40 個 id');
+    const dom = await boot({ saved: savedJson(payloadOf([...inPool, ...inExcluded].sort())) });
+
+    assert.equal(dom.$('sFxN').textContent, String(300), '出題母體仍是命中的 300 個');
+    // 〔堵〕這正是回歸的形狀：40 個沒消失的品項被報成「已不在最新資料中」
+    assert.equal(dom.hidden('startFxWarn'), true,
+      `不得示警：${dom.$('startFxWarn').textContent}`);
+    // 但也不得靜默——資訊要在，只是換成成立的措辭且不用警告色
+    const note = dom.$('sFxMissing').textContent;
+    assert.ok(note.includes('40'), `要說出 40 這個數字：${JSON.stringify(note)}`);
+    assert.doesNotMatch(note, /已不在最新資料/, '措辭不得宣稱它們消失了');
+  });
+
+  test('混合：橘字只數真的消失的那些，沒消失的走 muted', async () => {
+    needPool();
+    const inPool = pickIds(300, 6103);
+    const inExcluded = pickExcludedIds(40, 6104);
+    const gone = inPool.slice(0, 25);
+    const shrunk = { ...POOL, items: POOL.items.filter((it) => !gone.includes(it.id)) };
+    const dom = await boot({
+      saved: savedJson(payloadOf([...inPool, ...inExcluded].sort())),
+      pool: shrunk,
+    });
+
+    assert.equal(dom.$('sFxN').textContent, String(275));
+    assert.equal(dom.hidden('startFxWarn'), false, '真的消失了就必須示警');
+    const warn = dom.$('startFxWarn').textContent;
+    assert.ok(warn.includes('25'), `橘字要說 25：${warn}`);
+    // 〔堵〕把兩類加在一起報 65——那個數字沒有任何一種讀法是對的
+    assert.ok(!warn.includes('65'), `橘字不得把兩類加總：${warn}`);
+    assert.ok(dom.$('sFxMissing').textContent.includes('40'), 'muted 那句要說 40');
+  });
+
+  test('excluded.json 取不到：退回較弱但成立的措辭，不得示警也不得靜默', async () => {
+    needPool();
+    const inPool = pickIds(300, 6105);
+    const inExcluded = pickExcludedIds(40, 6106);
+    const dom = await boot({
+      saved: savedJson(payloadOf([...inPool, ...inExcluded].sort())),
+      fail: ['excluded.json'],
+    });
+
+    assert.equal(dom.hidden('startFxWarn'), true, '分辨不出來就不得示警');
+    const note = dom.$('sFxMissing').textContent;
+    assert.ok(note.includes('40'), `要說出數量：${JSON.stringify(note)}`);
+    assert.doesNotMatch(note, /已不在最新資料/);
+    // 硬性要求：新增的檔案不得拖垮既有功能（D47）
+    assert.equal(dom.hidden('start'), false, '出題不受影響');
+    cardFor(dom, Level.L1).click();
+    dom.$('btnStart').click();
+    await dom.settle();
+    assert.equal(dom.hidden('quiz'), false, 'excluded.json 掛了仍必須出得了題');
+  });
+
+  test('起始頁那次抓失敗，不得讓整個 session 都產不了連結', async () => {
+    // 〔堵〕把失敗記進 `state.excludedError`：開站時一次暫時性失敗，
+    //       之後教學藥師點「產生院內清單連結」會看到已停用，而那次失敗與產連結無關
+    needPool();
+    const dom = await boot({
+      saved: savedJson(payloadOf([...pickIds(300, 6107), ...pickExcludedIds(40, 6108)].sort())),
+      fail: ['excluded.json'],
+    });
+    const before = fetchControl.urls.filter((u) => u.includes('excluded.json')).length;
+    assert.ok(before > 0, '前置條件：起始頁真的抓過一次');
+
+    fetchControl.fail.delete('excluded.json');        // 網路恢復
+    dom.$('btnFormulary').click();
+    await dom.settle();
+    assert.ok(fetchControl.urls.filter((u) => u.includes('excluded.json')).length > before,
+      '產連結頁必須重抓，不得沿用起始頁那次的失敗');
+    assert.equal(dom.$('btnFxAnalyze').disabled, false, '產連結功能不得被那次失敗停用');
+    assert.equal(dom.hidden('fxError'), true);
+  });
+
+  test('missing 是空的就完全不抓 excluded.json（絕大多數清單的情形）', async () => {
+    needPool();
+    const dom = await boot({ saved: savedJson(payloadOf(pickIds(300, 6109))) });
+    assert.equal(dom.hidden('startFxWarn'), true);
+    assert.equal(dom.$('sFxMissing').textContent, '');
+    assert.deepEqual(fetchControl.urls.filter((u) => u.includes('excluded.json')), [],
+      '沒有要分辨的東西就不該多一次網路請求');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════
 describe('C45 禁用級別是「可見且程式化 no-op」', () => {
   /**
    * **每一級各驗一次**（依 codex-review TG-4）。原本只驗 L2——

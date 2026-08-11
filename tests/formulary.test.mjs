@@ -25,7 +25,7 @@ import {
   FormularyError,
   Category, CATEGORY_LABEL, classifyFormulary, buildExcludedIndex, validatePair,
   MIN_QUIZ_LEN, distractorNeed, minUsableK, quizLenFor, formularySeed,
-  prepareFormulary, probeLevel, probeFormulary,
+  prepareFormulary, probeLevel, probeFormulary, splitMissing,
 } from '../formulary.js';
 import {
   Level, QUIZ_SIZE, buildIndex, eligibleKeys, nameCollides, makeRng, validateQuizInvariants,
@@ -915,6 +915,38 @@ describe('A42 可用性判定：級別特定邊界＋真的組得出卷＋可重
     assert.equal(r.anyAvailable, false);
     assert.deepEqual(r.missing, [synthId(9999)]);
     assert.equal(r.N, 9);
+  });
+
+  /**
+   * v5.11：`missing` 拆成兩種後果完全不同的情形。
+   * 這支是純函式，UI 那一層（C44.1）驗的是「哪一種用橘字講」。
+   */
+  describe('splitMissing', () => {
+    const stages = new Map([[synthId(1), 'Q1'], [synthId(2), 'Q3']]);
+
+    test('分不出來時回 null——呼叫端必須自己決定講什麼', () => {
+      // 〔堵〕回 `{excluded: [], absent: [...]}` 當預設值：
+      //       那等於在還不知道的時候斷言「全部都消失了」，正是要修的那個假警報
+      assert.equal(splitMissing([synthId(1)], null), null);
+      assert.equal(splitMissing([synthId(1)], undefined), null);
+    });
+
+    test('在 excluded 內的歸 excluded，其餘歸 absent', () => {
+      const r = splitMissing([synthId(1), synthId(2), synthId(3)], stages);
+      assert.deepEqual(r.excluded, [synthId(1), synthId(2)]);
+      assert.deepEqual(r.absent, [synthId(3)]);
+    });
+
+    test('兩邊互斥且加總不遺漏', () => {
+      const miss = [synthId(1), synthId(3), synthId(4), synthId(2)];
+      const r = splitMissing(miss, stages);
+      assert.equal(r.excluded.length + r.absent.length, miss.length);
+      for (const id of r.excluded) assert.ok(!r.absent.includes(id));
+    });
+
+    test('空的 missing 兩邊都是空陣列，不是 null', () => {
+      assert.deepEqual(splitMissing([], stages), { excluded: [], absent: [] });
+    });
   });
 });
 

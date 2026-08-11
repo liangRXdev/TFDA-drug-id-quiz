@@ -142,7 +142,9 @@ K 會比 N 小，而且**每一級不一樣**：中級要湊同形同色又刻�
 - **院內版不寫最佳紀錄**，只顯示當回合分數。不同醫院的清單共用同一紀錄、換清單前後基準不同，
   那個數字沒有可比較的意義
 - **月更後品項消失只降級不阻斷**：以當前題庫重新比對、顯示縮水數字，
-  但**原始清單不會被覆寫**——品項日後回來就自動恢復
+  但**原始清單不會被覆寫**——品項日後回來就自動恢復。
+  「已不在最新資料中」的警告**只在品項真的兩份資料都查無時才出現**；
+  「在資料集中但不適合出題」的那些走灰字說明，不用警告色
 - 起始頁展開「題庫與資料來源」可**切回全題庫**（會把清單從這台瀏覽器移除，要再用得重新開連結）。
   刻意收在裡面而不放主要視線上：這是破壞性操作，好按不是優點
 - 完整網址上限 1,800 字元，超過就明確拒絕產生連結，不會給一條在部分平台會被截斷的連結
@@ -154,7 +156,7 @@ K 會比 N 小，而且**每一級不一樣**：中級要湊同形同色又刻�
 （見 `tests/fetch_images_probe.py`）。缺 uv 時該組**直接失敗而不是跳過**。
 
 ```bash
-npm test                 # engine、難度分級、閃卡、UI 接線、娛樂性強化、錯題再戰、院內清單、起始頁資訊層級、資料管線與 SW 界線（621 項）
+npm test                 # engine、難度分級、閃卡、UI 接線、娛樂性強化、錯題再戰、院內清單、起始頁資訊層級、資料管線與 SW 界線（630 項）
 npm run build:pool       # 抓取來源 → data/pool.json
 npm run fetch:images     # 鏡像圖片 → data/img/*.webp（需 uv）
 npm run verify           # 資料完整性驗證
@@ -187,7 +189,7 @@ tests/fetch_images_probe.py   fetch-images.py 的行為探針（真 Pillow；由
 .ai-review/plan.md            規格 v3（資料管線與 L3）
 .ai-review/plan-v3-levels.md  規格 v3.6（難度分級），含驗收條件與歷次修訂的理由
 .ai-review/plan-v4-engagement.md  規格 v4.7（連對／稱號／最佳紀錄／動畫／錯題再戰，含驗收條件與歷次修訂的理由）
-.ai-review/plan-v5-formulary.md   規格 v5.10（院內清單客製化），含 wire format 契約與驗收條件
+.ai-review/plan-v5-formulary.md   規格 v5.11（院內清單客製化），含 wire format 契約與驗收條件
 .ai-review/golden-vectors-v1.md   連結編碼的 golden vectors（在 codec 實作**之前**人工推導產出）
 .ai-review/C51-manual.md          375px 人工留檔的矩陣與執行結果
 .ai-review/v51-start-ia.md        起始頁資訊層級重排的取捨、人工留檔與一項待處理的既有缺陷
