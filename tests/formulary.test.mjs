@@ -1,9 +1,11 @@
 /**
- * V5 批次 1 — 藥證字號正規化與連結編碼（規格 plan-v5-formulary.md v5.8 的 A36–A40、A45）
+ * V5 批次 1／3 — 藥證字號正規化、連結編碼、四分類與級別可用性
+ * （規格 plan-v5-formulary.md v5.9 的 A36–A45）
  *
  *   node --test
  *
- * 這一檔只驗**純函式**。凡涉及 UI、localStorage、出題、管線者一律不在此。
+ * 這一檔只驗**純函式**。凡涉及 UI、localStorage、管線者一律不在此
+ * （批次 3 的出題判定本身是純函式，故在此）。
  *
  * **golden vectors 是外部 oracle**：G1–G5 的位元組與 payload 抄自
  * `.ai-review/golden-vectors-v1.md`，該檔在 codec 實作**之前**由人工推導產出
@@ -14,11 +16,20 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   PREFIX_TABLE, FORMAT_VERSION, PREFIX_TABLE_VERSION,
   normalizeLicense, tokenize, encodeFormulary, decodeFormulary, crc32,
   FormularyError,
+  Category, CATEGORY_LABEL, classifyFormulary, buildExcludedIndex,
+  MIN_QUIZ_LEN, distractorNeed, minUsableK, quizLenFor, formularySeed,
+  prepareFormulary, probeLevel, probeFormulary,
 } from '../formulary.js';
+import {
+  Level, QUIZ_SIZE, buildIndex, eligibleKeys, nameCollides, makeRng, validateQuizInvariants,
+} from '../engine.js';
 import { COLLISION_GROUPS, PREFIX_SAMPLES } from './_license-fixtures.mjs';
 
 /** 抄自 .ai-review/golden-vectors-v1.md，**不得由 encodeFormulary 產生後回填** */
@@ -470,5 +481,543 @@ describe('D35.1／D35.1a tokenization 契約', () => {
 
   test('欄序超出範圍 → 拒絕', () => {
     throwsCode(() => tokenize('a,b\nc,d', { delimiter: ',', column: 5 }), 'COLUMN_OUT_OF_RANGE');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════
+// V5 批次 3 — 四分類（D37）／級別可用性（D38）／出題封閉性（D36）
+// ════════════════════════════════════════════════════════════════════
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const readJson = (p) => (fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : null);
+const POOL = readJson(path.join(ROOT, 'data/pool.json'));
+const EXCLUDED = readJson(path.join(ROOT, 'data/excluded.json'));
+const needData = () => assert.ok(POOL && EXCLUDED,
+  'data/pool.json 與 data/excluded.json 都必須存在，請先執行 npm run build:pool');
+
+/** 合成 canonical id（index 0 前綴，6 位號碼）。1-based，號碼 0 非法 */
+const synthId = (n) => `衛署藥製字第${String(n).padStart(6, '0')}號`;
+
+/**
+ * 合成答案鍵：等長 3 字母 ＋ 一個檢查字元 ⇒ 任兩個 Hamming 距離 ≥2。
+ *
+ * 為什麼不用 `DRUG1`／`DRUG2`：那兩個編輯距離為 1，`nameCollides` 會判碰撞，
+ * 於是 fixture 的 K 會**悄悄少掉**，A42 的邊界就對不上真正要驗的那個數字。
+ * 等長也順便排除 `startsWith` 那條前綴碰撞。
+ */
+function codeName(i) {
+  const A = (n) => String.fromCharCode(65 + n);
+  const hi = Math.floor(i / 26), lo = i % 26;
+  return A(hi) + A(lo) + A((hi + lo) % 26);
+}
+
+/** fixture 自檢：答案鍵兩兩不得碰撞，否則 K 會與宣稱的不符 */
+function assertNoNameCollision(items) {
+  const names = [...new Set(items.map((it) => it.ans))];
+  for (let i = 0; i < names.length; i++) {
+    for (let j = i + 1; j < names.length; j++) {
+      assert.ok(!nameCollides(names[i], names[j]),
+        `fixture 產生了碰撞的答案鍵：${names[i]} / ${names[j]}`);
+    }
+  }
+}
+
+/** L1／L3 用：外觀兩兩不相交 ⇒ 全部答案鍵可用 ⇒ K === count */
+function mkDisjointItems(count, { idFrom = 1, nameFrom = 0 } = {}) {
+  const items = [];
+  for (let i = 0; i < count; i++) {
+    items.push({
+      id: synthId(idFrom + i),
+      ans: codeName(nameFrom + i),
+      shape: [`S${nameFrom + i}`],
+      color: [`C${nameFrom + i}`],
+      score_mark: ['無'], size: '8', mark1: `M${nameFrom + i}`, mark2: null,
+      img: `img/${nameFrom + i}.webp`,
+    });
+  }
+  assertNoNameCollision(items);
+  return items;
+}
+
+/** L2 用：同形同色、刻字互異 ⇒ 每筆都湊得到 5 個嚴格候選 ⇒ K === count（count ≥ 6） */
+function mkL2Items(count, { idFrom = 1, nameFrom = 0 } = {}) {
+  const items = [];
+  for (let i = 0; i < count; i++) {
+    items.push({
+      id: synthId(idFrom + i),
+      ans: codeName(nameFrom + i),
+      shape: ['圓形'], color: ['白'],
+      score_mark: ['無'], size: '8', mark1: `MK${nameFrom + i}`, mark2: null,
+      img: `img/${nameFrom + i}.webp`,
+    });
+  }
+  assertNoNameCollision(items);
+  return items;
+}
+
+const mkItems = (level, count, opts) =>
+  (level === Level.L2 ? mkL2Items(count, opts) : mkDisjointItems(count, opts));
+
+/** 題卷的穩定 identity：逐題的正解／選項／備援 id 序列 */
+const quizIdentity = (quiz) => quiz.map((q) => [
+  q.item.id,
+  (q.options || []).map((o) => o.id).join(','),
+  (q.spares || []).map((s) => s.id).join(','),
+].join('|'));
+
+/** 整卷用到的全部紀錄 id（正解 ∪ 選項 ∪ 備援） */
+function allQuizIds(quiz) {
+  const out = new Set();
+  for (const q of quiz) {
+    out.add(q.item.id);
+    for (const o of q.options || []) out.add(o.id);
+    for (const s of q.spares || []) out.add(s.id);
+  }
+  return out;
+}
+
+const payloadOf = (items) => encodeFormulary(items.map((it) => it.id), 0);
+
+// ════════════════════════════════════════════════════════════════════
+describe('A41 出題品項封閉於子集（防 vacuous pass）', () => {
+  // 〔堵〕(a) 空卷讓逐題斷言 vacuous pass；(b) 隨機抽樣剛好沒抽到洩漏品項；
+  //       (c) 只驗正解不驗誘答
+  test('三級：pool-only sentinel 在全庫但不得進入任何一卷', () => {
+    const subset = mkDisjointItems(30, { idFrom: 100, nameFrom: 0 });
+    const l2subset = mkL2Items(30, { idFrom: 100, nameFrom: 0 });
+
+    // sentinel：**只存在於全庫**。id 以「內」開頭 ⇒ 排序恆在子集之前（子集排序若
+    // 沒做、或索引誤用全庫，它會是最早被看到的候選）。外觀與所有子集品項都不相交、
+    // 刻字互異 ⇒ 對 L1／L2 都是「合法且優先」的誘答
+    const sentinels = [];
+    for (let i = 0; i < 8; i++) {
+      sentinels.push({
+        id: `內衛成製字第${String(i + 1).padStart(6, '0')}號`,
+        ans: codeName(200 + i),
+        shape: ['圓形'], color: ['白'],
+        score_mark: ['無'], size: '8', mark1: `ZZ${i}`, mark2: null,
+        img: `img/sentinel${i}.webp`,
+      });
+    }
+
+    for (const [level, base] of [[Level.L1, subset], [Level.L2, l2subset], [Level.L3, subset]]) {
+      const full = [...sentinels, ...base];              // sentinel 排在最前面
+      const matchedIds = new Set(base.map((it) => it.id));
+      const r = probeFormulary({
+        payload: payloadOf(base), poolItems: full, matchedIds, levels: [level],
+      }).levels[level];
+
+      // 先證明卷是真的組出來的——空卷的聯集是空集合，自然是子集
+      assert.equal(r.available, true, `${level} 應可用`);
+      assert.equal(r.quiz.length, QUIZ_SIZE, `${level} 卷長應為 20`);
+      // 不讀實作自己回報的 violations（那是受測程式產生的期望值）——
+      // 以測試自己重建的子集 index 獨立驗一次
+      assert.deepEqual(validateQuizInvariants(r.quiz, { level, index: buildIndex(base) }), []);
+
+      const used = allQuizIds(r.quiz);
+      assert.ok(used.size > 0);
+      for (const id of used) {
+        assert.ok(matchedIds.has(id), `${level} 出現子集外的品項：${id}`);
+      }
+      for (const s of sentinels) {
+        assert.ok(!used.has(s.id), `${level} 洩漏了全庫品項 ${s.id}`);
+      }
+      // 逐題也要驗（不是只看聯集）：正解、全部選項、全部備援
+      for (const q of r.quiz) {
+        assert.ok(matchedIds.has(q.item.id));
+        for (const o of q.options || []) assert.ok(matchedIds.has(o.id));
+        for (const sp of q.spares || []) assert.ok(matchedIds.has(sp.id));
+      }
+    }
+  });
+
+  test('子集索引本身不得含全庫品項（結構層的同一道防線）', () => {
+    const base = mkDisjointItems(30, { idFrom: 100 });
+    const sentinel = { ...mkDisjointItems(1, { idFrom: 1, nameFrom: 300 })[0], id: '內衛成製字第000001號' };
+    const prep = prepareFormulary([sentinel, ...base], new Set(base.map((it) => it.id)));
+    assert.equal(prep.N, 30);
+    assert.ok(!prep.items.some((it) => it.id === sentinel.id));
+    assert.ok(!prep.index.keys.includes(sentinel.ans));
+    assert.deepEqual(prep.missing, []);
+  });
+
+  test('真實題庫的隨機子集：三級都組得出卷且封閉', () => {
+    needData();
+    // 決定性子集：以固定 seed 從真實 pool 抽 300 筆
+    const rng = makeRng(20260811);
+    const ids = POOL.items.map((it) => it.id);
+    for (let i = 0; i < 300; i++) {
+      const j = i + Math.floor(rng() * (ids.length - i));
+      [ids[i], ids[j]] = [ids[j], ids[i]];
+    }
+    const matchedIds = new Set(ids.slice(0, 300));
+    const r = probeFormulary({
+      payload: encodeFormulary(matchedIds, 0), poolItems: POOL.items, matchedIds,
+    });
+    assert.equal(r.N, 300);
+    for (const level of [Level.L1, Level.L2, Level.L3]) {
+      const lr = r.levels[level];
+      assert.equal(lr.available, true, `${level} 在 300 品項子集應可用（K=${lr.K}）`);
+      assert.equal(lr.quiz.length, QUIZ_SIZE);
+      for (const id of allQuizIds(lr.quiz)) {
+        assert.ok(matchedIds.has(id), `${level} 洩漏了子集外的 ${id}`);
+      }
+    }
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════
+describe('A42 可用性判定：級別特定邊界＋真的組得出卷＋可重現', () => {
+  // 〔堵〕(a) availability 只依 .size 回標籤，不證明能出卷；
+  //       (b) 三個級別共用同一組 K 邊界（v5.2 的錯誤，會掩蓋 L1／L2 的誘答需求）；
+  //       (c) 只用單一 seed，敵意子集恰好在該 seed 失敗就通過
+  const BOUNDS = {
+    [Level.L1]: [[12, null], [13, 10], [22, 19], [23, 20]],
+    [Level.L2]: [[14, null], [15, 10], [24, 19], [25, 20]],
+    [Level.L3]: [[9, null], [10, 10], [19, 19], [20, 20]],
+  };
+
+  test('D38.1 的算術本身：三級的 need／最小 K／卷長公式各不相同', () => {
+    assert.deepEqual([Level.L1, Level.L2, Level.L3].map(distractorNeed), [3, 5, 0]);
+    assert.deepEqual([Level.L1, Level.L2, Level.L3].map(minUsableK), [13, 15, 10]);
+    assert.equal(MIN_QUIZ_LEN, 10);
+    // 卷長是 min(20, K − need)，不是 K
+    assert.equal(quizLenFor(Level.L1, 23), 20);
+    assert.equal(quizLenFor(Level.L1, 22), 19);
+    assert.equal(quizLenFor(Level.L2, 25), 20);
+    assert.equal(quizLenFor(Level.L2, 24), 19);
+    assert.equal(quizLenFor(Level.L3, 20), 20);
+  });
+
+  for (const [level, rows] of Object.entries(BOUNDS)) {
+    for (const [K, expectLen] of rows) {
+      test(`${level} K=${K} → ${expectLen === null ? '禁用' : `卷長 ${expectLen}`}`, () => {
+        const items = mkItems(level, K);
+        const index = buildIndex(items);
+        // fixture 自檢：宣稱的 K 必須真的是該級的可出題鍵數
+        assert.equal(eligibleKeys(index, level).size, K, `fixture 的 K 不是 ${K}`);
+
+        const r = probeLevel({ payload: payloadOf(items), level, items, index });
+        assert.equal(r.K, K);
+        if (expectLen === null) {
+          assert.equal(r.available, false);
+          assert.equal(r.code, 'K_BELOW_MIN');
+          assert.equal(r.quiz, null);
+          return;
+        }
+        // 標記為可用者**都必須實際組卷成功並通過 invariants**
+        assert.equal(r.available, true, `應可用但被判 ${r.code}：${r.reason}`);
+        assert.equal(r.quizLen, expectLen);
+        assert.equal(r.quiz.length, expectLen);
+        // 不讀實作自己回報的 violations（那是受測程式產生的期望值）——
+        // 以測試自己重建的子集 index 獨立驗一次
+        assert.deepEqual(validateQuizInvariants(r.quiz, { level, index: buildIndex(items) }), []);
+        const ids = new Set(items.map((it) => it.id));
+        for (const id of allQuizIds(r.quiz)) assert.ok(ids.has(id));
+      });
+    }
+  }
+
+  test('敵意子集：K 過門檻但整卷組不出來 → 判不可用（≥5 個 seed 都一樣）', () => {
+    // A1–A10 同形同色（彼此不能當誘答）；B1–B3 外觀與 A 不相交但**三者名稱互相碰撞**。
+    // 逐鍵判定（recordEligible 不看整卷脈絡）會說 13 個鍵全部可用：
+    // A 各有 B1/B2/B3 三個外觀不相交的候選，B 各有 10 個 A。
+    // 但整卷 excludeAns 恆為全卷正解集合（H2），10 題怎麼抽都湊不到 3 個兩兩合法的誘答。
+    const A = [];
+    for (let i = 0; i < 10; i++) {
+      A.push({ id: synthId(1 + i), ans: codeName(i), shape: ['S0'], color: ['C0'],
+        score_mark: ['無'], size: '8', mark1: `A${i}`, mark2: null, img: `a${i}.webp` });
+    }
+    const B = ['XXA', 'XXB', 'XXC'].map((ans, i) => ({
+      id: synthId(101 + i), ans, shape: ['S1'], color: ['C1'],
+      score_mark: ['無'], size: '8', mark1: `B${i}`, mark2: null, img: `b${i}.webp` }));
+    for (const b of B) for (const b2 of B) if (b !== b2) {
+      assert.ok(nameCollides(b.ans, b2.ans), 'B 組必須彼此名稱碰撞，否則這個 fixture 不敵意');
+    }
+    const items = [...A, ...B];
+    const index = buildIndex(items);
+
+    // 前置門檻**過得了**——這正是「只看 .size 就發可用標籤」會誤判的地方
+    assert.equal(eligibleKeys(index, Level.L1).size, 13);
+    assert.equal(minUsableK(Level.L1), 13);
+    assert.equal(quizLenFor(Level.L1, 13), 10);
+
+    for (const payload of ['seedA', 'seedB', 'seedC', 'seedD', 'seedE', payloadOf(items)]) {
+      const r = probeLevel({ payload, level: Level.L1, items, index });
+      assert.equal(r.available, false, `payload=${payload} 竟判為可用`);
+      assert.equal(r.code, 'QUIZ_ASSEMBLY_FAILED');
+      assert.equal(r.quiz, null);
+      assert.equal(r.quizLen, 10, '仍要如實回報它嘗試的目標卷長');
+    }
+  });
+
+  test('D38.3 可重現：同 payload ＋同子集 ＋同 level → 同判定、同第一卷（≥5 次）', () => {
+    const items = mkDisjointItems(30);
+    const payload = payloadOf(items);
+    const first = probeLevel({ payload, level: Level.L1, items });
+    assert.equal(first.available, true);
+    for (let i = 0; i < 5; i++) {
+      const r = probeLevel({ payload, level: Level.L1, items });
+      assert.equal(r.available, first.available);
+      assert.equal(r.K, first.K);
+      assert.deepEqual(quizIdentity(r.quiz), quizIdentity(first.quiz),
+        '同一 payload 必須得到相同的第一卷，否則會「檢查時可用、按下去失敗」');
+    }
+  });
+
+  test('D38.3 seed 只由 payload 與 level 決定，與 Math.random 無關', () => {
+    const items = mkDisjointItems(30);
+    const payload = payloadOf(items);
+    // 不同 level → 不同 seed（否則三級的第一卷會是同一組抽樣）
+    const seeds = [Level.L1, Level.L2, Level.L3].map((lv) => formularySeed(payload, lv));
+    assert.equal(new Set(seeds).size, 3);
+    const before = Math.random;
+    try {
+      Math.random = () => 0.5;
+      assert.deepEqual([Level.L1, Level.L2, Level.L3].map((lv) => formularySeed(payload, lv)), seeds);
+      const a = probeLevel({ payload, level: Level.L1, items });
+      Math.random = () => 0.9;
+      const b = probeLevel({ payload, level: Level.L1, items });
+      assert.deepEqual(quizIdentity(a.quiz), quizIdentity(b.quiz));
+    } finally { Math.random = before; }
+  });
+
+  test('D38.3 子集排序：輸入順序不得影響判定與第一卷', () => {
+    // 〔堵〕忘了「餵入 buildIndex 前依 canonical id 昇冪排序」——
+    //       同一份清單在不同 pool 版本（列序不同）下會抽出不同的卷
+    const items = mkDisjointItems(30);
+    const payload = payloadOf(items);
+    const shuffled = [...items].reverse();
+    const wanted = new Set(items.map((i) => i.id));
+    const a = probeFormulary({ payload, poolItems: items, matchedIds: wanted });
+    const b = probeFormulary({ payload, poolItems: shuffled, matchedIds: wanted });
+    assert.deepEqual(b.items.map((i) => i.id), a.items.map((i) => i.id));
+    // 這份 fixture 外觀兩兩不相交，L2 抽不到同形同色的誘答 ⇒ L2 本來就不可用。
+    // 那也是「判定必須一致」的一部分，不可只比對可用的那兩級
+    assert.equal(a.levels[Level.L2].available, false);
+    for (const lv of [Level.L1, Level.L2, Level.L3]) {
+      assert.equal(b.levels[lv].available, a.levels[lv].available, `${lv} 的判定隨輸入順序改變`);
+      assert.equal(b.levels[lv].code, a.levels[lv].code);
+      assert.equal(b.levels[lv].K, a.levels[lv].K);
+      if (a.levels[lv].available) {
+        assert.deepEqual(quizIdentity(b.levels[lv].quiz), quizIdentity(a.levels[lv].quiz));
+      }
+    }
+  });
+
+  test('三級全禁用時 anyAvailable 為 false；D41 的 missing 不吞掉', () => {
+    const items = mkDisjointItems(9);
+    const gone = [...items.map((i) => i.id), synthId(9999)];
+    const r = probeFormulary({ payload: payloadOf(items), poolItems: items, matchedIds: new Set(gone) });
+    assert.equal(r.anyAvailable, false);
+    assert.deepEqual(r.missing, [synthId(9999)]);
+    assert.equal(r.N, 9);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════
+describe('A43 短卷的完整封閉性（級別特定）', () => {
+  // 〔堵〕沿用 v5.2 的「正解集合恰等於 K」——對 L1／L2 數學上不可能，
+  //       實作只能靠違反 H2 或跨子集誘答通過
+  const CASES = [
+    { level: Level.L1, K: 14, len: 11, proper: true },
+    { level: Level.L2, K: 15, len: 10, proper: true },
+    { level: Level.L3, K: 14, len: 14, proper: false },
+  ];
+
+  for (const { level, K, len, proper } of CASES) {
+    test(`${level} K=${K} → 卷長 ${len}，正解集合${proper ? '為真子集' : '恰等於全部鍵'}`, () => {
+      const items = mkItems(level, K);
+      const index = buildIndex(items);
+      assert.equal(eligibleKeys(index, level).size, K);
+
+      const r = probeLevel({ payload: payloadOf(items), level, items, index });
+      assert.equal(r.available, true, `應可用但被判 ${r.code}`);
+      assert.equal(r.quiz.length, len);
+      // 不讀實作自己回報的 violations（那是受測程式產生的期望值）——
+      // 以測試自己重建的子集 index 獨立驗一次
+      assert.deepEqual(validateQuizInvariants(r.quiz, { level, index: buildIndex(items) }), []);
+
+      const keys = new Set(items.map((it) => it.ans));
+      const corrects = new Set(r.quiz.map((q) => q.item.ans));
+      assert.equal(corrects.size, len);
+      for (const k of corrects) assert.ok(keys.has(k));
+      if (proper) {
+        assert.ok(corrects.size < keys.size, '正解集合必須是真子集（誘答要從卷外取）');
+        assert.equal(keys.size - corrects.size, distractorNeed(level),
+          '留給誘答的鍵數必須恰為該級的 need');
+      } else {
+        assert.deepEqual([...corrects].sort(), [...keys].sort());
+      }
+
+      const ids = new Set(items.map((it) => it.id));
+      for (const q of r.quiz) {
+        for (const o of q.options || []) assert.ok(ids.has(o.id), `選項 ${o.id} 不在子集`);
+        for (const s of q.spares || []) assert.ok(ids.has(s.id), `備援 ${s.id} 不在子集`);
+      }
+    });
+  }
+
+  test('L2 K=14 只能是禁用（A42／A43 曾互相矛盾，見 R3-6）', () => {
+    const items = mkL2Items(14);
+    const r = probeLevel({ payload: payloadOf(items), level: Level.L2, items });
+    assert.equal(r.available, false);
+    assert.equal(r.code, 'K_BELOW_MIN');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════
+describe('A44 四分類逐 stage 精確 membership', () => {
+  // 〔堵〕把所有 unmatched 錯分到同一類，總和與互斥仍然成立——
+  //       封閉性斷言證明不了分類正確。且 v5.0 完全沒測 Q3
+  const ID = {
+    pool1: synthId(11), pool2: synthId(12),
+    q1: synthId(21), q2: synthId(22), q3: synthId(23), q4: synthId(24), q5: synthId(25),
+    ghost: synthId(31),                       // 格式合法、兩份檔案都沒有
+  };
+  const refs = () => ({
+    poolIds: new Set([ID.pool1, ID.pool2]),
+    excludedStages: new Map([
+      [ID.q1, 'Q1'], [ID.q2, 'Q2'], [ID.q3, 'Q3'], [ID.q4, 'Q4'], [ID.q5, 'Q5'],
+    ]),
+  });
+
+  test('逐筆精確歸屬：matched／Q1／Q2／Q3／Q4／Q5／來源不存在', () => {
+    const junk = '衛署藥XX字第000001號';     // 未知前綴 → 正規化不出東西
+    const r = classifyFormulary(
+      [ID.pool1, ID.pool2, ID.q1, ID.q2, ID.q3, ID.q4, ID.q5, ID.ghost, junk], refs());
+
+    assert.deepEqual(r.matched, [ID.pool1, ID.pool2]);
+    assert.deepEqual(r.nonSolidOral, [ID.q1]);
+    assert.deepEqual(r.lowQuality, [ID.q2, ID.q3, ID.q4, ID.q5]);
+    assert.deepEqual([...r.unlisted].sort(), [ID.ghost, junk].sort());
+    assert.deepEqual(r.byStage, {
+      Q1: [ID.q1], Q2: [ID.q2], Q3: [ID.q3], Q4: [ID.q4], Q5: [ID.q5],
+    });
+    // 第二類必須涵蓋 Q3（品名過短），不得只有「無圖或無刻字」
+    assert.ok(r.lowQuality.includes(ID.q3));
+    assert.ok(CATEGORY_LABEL[Category.LOW_QUALITY].includes('品名過短'));
+  });
+
+  test('總和封閉與兩兩互斥', () => {
+    const all = [ID.pool1, ID.pool2, ID.q1, ID.q2, ID.q3, ID.q4, ID.q5, ID.ghost];
+    const r = classifyFormulary(all, refs());
+    const groups = [r.matched, r.nonSolidOral, r.lowQuality, r.unlisted];
+    assert.equal(groups.reduce((n, g) => n + g.length, 0), r.distinct);
+    assert.equal(r.distinct, all.length);
+    for (let i = 0; i < groups.length; i++) {
+      for (let j = i + 1; j < groups.length; j++) {
+        for (const v of groups[i]) assert.ok(!groups[j].includes(v), `${v} 同時屬於兩類`);
+      }
+    }
+    // D34.1：payload 只帶「來源已知」的 id
+    assert.deepEqual(r.payloadIds, [...r.matched, ...r.nonSolidOral, ...r.lowQuality].sort());
+    assert.ok(!r.payloadIds.includes(ID.ghost));
+    assert.equal(r.unlistedCount, 1);
+  });
+
+  test('重複 id：去重時點在正規化之後（全形／空白／缺第缺號都算同一筆）', () => {
+    const variants = [
+      '衛署藥製字第000021號', '衛署藥製字第００００２１號', ' 衛署藥製字第 000021 號 ',
+      '衛署藥製字第21號', '衛署藥製字000021', '衛署藥製字第000021號',
+    ];
+    const r = classifyFormulary(variants, refs());
+    assert.equal(r.distinct, 1);
+    assert.deepEqual(r.nonSolidOral, [ID.q1]);
+    assert.equal(r.matched.length + r.lowQuality.length + r.unlisted.length, 0);
+  });
+
+  test('第三類的去重與 UNLISTED 計數用同一套折疊（D34.2a）', () => {
+    // 〔堵〕正規化失敗的 token 若改用另一套（或不做）折疊，
+    //       同一個未知前綴的全形／半形寫法會被算成 2 筆
+    const r = classifyFormulary(
+      ['衛署藥XX字第000001號', '衛署藥ＸＸ字第０００００１號', ' 衛署藥XX字第000001號 '], refs());
+    assert.equal(r.unlistedCount, 1);
+    assert.equal(r.distinct, 1);
+  });
+
+  test('空／空白 token 不計入任何一類，但也不靜默丟掉', () => {
+    const r = classifyFormulary(['', '   ', '　', ID.pool1], refs());
+    assert.equal(r.blank, 3);
+    assert.equal(r.distinct, 1);
+    assert.deepEqual(r.matched, [ID.pool1]);
+  });
+
+  test('stage 由 excluded.json 決定，分類層不得改寫（precedence 由 B10 守）', () => {
+    // 同一筆 id 換一個 stage，分類必須跟著換——若實作自己推導 stage，這條會紅
+    const alt = new Map([[ID.q1, 'Q4']]);
+    const r = classifyFormulary([ID.q1], { poolIds: new Set(), excludedStages: alt });
+    assert.deepEqual(r.byStage.Q4, [ID.q1]);
+    assert.deepEqual(r.nonSolidOral, []);
+    assert.deepEqual(r.lowQuality, [ID.q1]);
+  });
+
+  test('缺 excludedStages 直接拋 —— 少了它 Q1–Q5 會全被誤標成「不在資料集中」', () => {
+    throwsCode(() => classifyFormulary([ID.q1], { poolIds: new Set() }), 'BAD_EXCLUDED_INDEX');
+    throwsCode(() => classifyFormulary([ID.q1], { excludedStages: new Map() }), 'BAD_POOL_IDS');
+  });
+
+  test('stage 值域外 → 拋錯，不得默默歸成某一類', () => {
+    throwsCode(() => classifyFormulary([ID.q1],
+      { poolIds: new Set(), excludedStages: new Map([[ID.q1, 'Q9']]) }), 'BAD_STAGE');
+  });
+
+  test('D37.1 顯示名稱：不得暗示使用者打錯，且內外代碼分離', () => {
+    for (const label of Object.values(CATEGORY_LABEL)) {
+      assert.ok(!label.includes('查無此證'), '「查無此證」不得出現在使用者可見之處');
+      assert.ok(!label.includes('請核對'));
+    }
+    const u = CATEGORY_LABEL[Category.UNLISTED];
+    assert.ok(u.includes('不在外觀資料集中'));
+    assert.ok(u.includes('針劑') && u.includes('外用') && u.includes('眼藥'));
+    assert.ok(u.includes('已下市') && u.includes('誤植'), '做不到的區分必須誠實涵蓋全部可能');
+    assert.equal(Category.UNLISTED, 'UNLISTED');
+  });
+
+  test('真實兩份資料：逐 stage 筆數必須等於 pool.meta.stages 的首次淘汰差值', () => {
+    needData();
+    // 期望值取自**管線自己的另一個輸出**（`meta.stages` 的存活數差值），
+    // 不是由 excluded.json 自己數出來的——規格引用管線行為時一律取管線的輸出
+    const order = ['來源', ...Object.keys(POOL.meta.stages).filter((k) => /^Q[1-5] /.test(k))];
+    const expect = {};
+    for (let i = 1; i < order.length; i++) {
+      expect[order[i].slice(0, 2)] = POOL.meta.stages[order[i - 1]] - POOL.meta.stages[order[i]];
+    }
+    assert.deepEqual(expect, { Q1: 572, Q2: 1, Q3: 8, Q4: 1603, Q5: 170 },
+      'D37 表格的筆數與 pool.meta.stages 對不上');
+
+    const stages = buildExcludedIndex(POOL, EXCLUDED);
+    const poolIds = new Set(POOL.items.map((it) => it.id));
+    const r = classifyFormulary(EXCLUDED.items.map((it) => it.id), { poolIds, excludedStages: stages });
+
+    assert.equal(r.matched.length, 0);
+    assert.equal(r.unlistedCount, 0);
+    assert.equal(r.distinct, EXCLUDED.items.length);
+    for (const q of ['Q1', 'Q2', 'Q3', 'Q4', 'Q5']) {
+      assert.equal(r.byStage[q].length, expect[q], `${q} 筆數不符`);
+    }
+    assert.equal(r.nonSolidOral.length, expect.Q1);
+    assert.equal(r.lowQuality.length, expect.Q2 + expect.Q3 + expect.Q4 + expect.Q5);
+    assert.equal(r.nonSolidOral.length + r.lowQuality.length, EXCLUDED.meta.count);
+  });
+
+  test('真實兩份資料：pool 的 id 全部歸 matched，一筆都不得落入其他類', () => {
+    needData();
+    const stages = buildExcludedIndex(POOL, EXCLUDED);
+    const poolIds = new Set(POOL.items.map((it) => it.id));
+    const r = classifyFormulary(POOL.items.map((it) => it.id), { poolIds, excludedStages: stages });
+    assert.equal(r.matched.length, POOL.items.length);
+    assert.equal(r.nonSolidOral.length + r.lowQuality.length + r.unlisted.length, 0);
+  });
+
+  test('D49：excluded.json 單筆損毀即整份不可用（不做逐筆容錯）', () => {
+    needData();
+    const broken = { meta: { ...EXCLUDED.meta }, items: [...EXCLUDED.items] };
+    broken.items[7] = { id: broken.items[7].id, stage: 'Q7' };
+    assert.throws(() => buildExcludedIndex(POOL, broken), (e) =>
+      e instanceof FormularyError && e.code === 'EXCLUDED_UNUSABLE' && e.errors.length >= 1);
+    // hash 不成對也是整份不可用（D47：產連結停用，出題不受影響）
+    const mismatched = { meta: { ...EXCLUDED.meta, content_hash: 'sha256:0' }, items: EXCLUDED.items };
+    throwsCode(() => buildExcludedIndex(POOL, mismatched), 'EXCLUDED_UNUSABLE');
   });
 });

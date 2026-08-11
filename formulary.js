@@ -1,8 +1,9 @@
 /**
- * V5 院內清單 — 藥證字號正規化與連結編碼（wire format v1）
+ * V5 院內清單 — 藥證字號正規化、連結編碼（wire format v1）、四分類與級別可用性
  *
- * 規格：`.ai-review/plan-v5-formulary.md` v5.8 的 D34.2／34.2a／34.3／34.4／34.4a、
- *       D35.1／35.1a／35.2。golden vectors：`.ai-review/golden-vectors-v1.md`。
+ * 規格：`.ai-review/plan-v5-formulary.md` v5.9 的 D34.2／34.2a／34.3／34.4／34.4a、
+ *       D35.1／35.1a／35.2（批次 1–2）與 D36／D37／D37.1／D38.1–38.3／D49（批次 3）。
+ *       golden vectors：`.ai-review/golden-vectors-v1.md`。
  *
  * **這個檔案為什麼不併進 engine.js**：`engine.js` 的 `normalize()` 正規化的是
  * **英文品名**（產生答案鍵），本檔的 `normalizeLicense()` 正規化的是**藥證字號**。
@@ -12,6 +13,11 @@
  * 且舊 decoder 必須繼續能解舊 payload。golden vectors 是外部 oracle——
  * **實作跑出不同結果時，錯的是實作，不得回頭改 golden**。
  */
+
+import {
+  Level, QUIZ_SIZE, CHOICE_COUNT, DISTRACTOR_COUNT,
+  buildIndex, eligibleKeys, drawLeveledQuiz, validateQuizInvariants, makeRng,
+} from './engine.js';
 
 export const FORMAT_VERSION = 0x01;
 export const PREFIX_TABLE_VERSION = 0x01;
@@ -72,6 +78,19 @@ function toHalfWidth(s) {
 }
 
 /**
+ * 折疊：全形→半形、去掉所有空白、轉大寫。**正規化與分類去重共用這一套**。
+ *
+ * 抽出來的理由（D37）：正規化失敗的 token（未知前綴、垃圾字串）沒有 canonical id，
+ * 去重只能靠原字串。若那裡用**另一套**折疊規則，`衛署藥XX字第1號` 與
+ * `衛署藥ＸＸ字第１號` 會被算成兩筆 UNLISTED，而它們正規化成功時會被算成一筆——
+ * 同一份清單的 `unlistedCount` 就依「有沒有踩到未知前綴」而有兩套語意。
+ */
+function foldToken(raw) {
+  if (typeof raw !== 'string') return '';
+  return toHalfWidth(raw).replace(/[\s　]/g, '').toUpperCase();
+}
+
+/**
  * 把任意 token 正規化成 canonical 藥證字號，失敗回 `null`。
  *
  * **容忍**：全形數字與字母、前後與內部空白、大小寫、前導零、`第`／`號` 缺漏。
@@ -84,9 +103,8 @@ function toHalfWidth(s) {
  * 本函式**冪等**：`normalizeLicense(normalizeLicense(x)) === normalizeLicense(x)`。
  */
 export function normalizeLicense(raw) {
-  if (typeof raw !== 'string') return null;
   // 去掉所有空白（含全形空白）。中文前綴內部不該有空白，但貼上的資料常有
-  const s = toHalfWidth(raw).replace(/[\s　]/g, '').toUpperCase();
+  const s = foldToken(raw);
   if (!s) return null;
 
   // 逐一試前綴。長前綴優先，否則 `衛署藥輸字第` 會先吃掉 `衛署藥輸字第R…`
@@ -411,4 +429,325 @@ export function decodeFormulary(payload) {
   if (pos !== covered.length) fail('TRAILING_BYTES', 'groups 解完後仍有多餘位元組');
 
   return { ids, unlistedCount };
+}
+
+// ── D49 `excluded.json` 的資料契約 ──────────────────────────────────
+
+/**
+ * D49 的成對不變量。**回傳錯誤清單（空陣列＝通過），不拋例外**——
+ * `verify-data` 要一次列出全部問題，不是遇到第一個就停。
+ *
+ * 抽成純函式的理由（批次 2 覆審發現 3／5／6）：原本內聯在 `build-pool.mjs` 的
+ * `main()` 裡，而 `excludedPayload` 的 `content_hash` 是**上一行才從 `payload`
+ * 複製過去的**，於是「兩檔 hash 不一致」這條檢查在正常執行中**永遠不成立**——是死碼。
+ * 抽出來後它才有真實輸入：`verify-data` 與前端餵的都是**兩份各自獨立讀進來的檔案**。
+ *
+ * 放在 `formulary.js` 而不是管線的理由（批次 3）：前端載入 `excluded.json` 時要做
+ * 同一套檢查（D47），而管線那個檔 import 了 `node:fs`，瀏覽器 import 不了。
+ *
+ * @param {object} pool      `pool.json` 的完整內容
+ * @param {object} excluded  `excluded.json` 的完整內容
+ * @param {Set<string>|null} srcIds 來源去重後的 id 集合；`null` 表示跳過聯集檢查
+ * @returns {string[]} 錯誤訊息清單
+ */
+export function validatePair(pool, excluded, srcIds = null) {
+  const errs = [];
+  const bad = (m) => errs.push(m);
+
+  if (!excluded || typeof excluded !== 'object') return ['excluded.json 不是物件'];
+  const meta = excluded.meta;
+  if (!meta || typeof meta !== 'object') return ['excluded.json 缺 meta（D49 要求 { meta, items }）'];
+  if (meta.schema !== 1) bad(`excluded.json 的 schema 未知：${JSON.stringify(meta.schema)}`);
+  if (!Array.isArray(excluded.items)) return ['excluded.json 的 items 不是陣列'];
+  if (meta.count !== excluded.items.length) {
+    bad(`excluded.json 的 count(${meta.count}) 與 items.length(${excluded.items.length}) 不符`);
+  }
+
+  const poolIds = new Set((pool?.items ?? []).map((i) => i.id));
+  const seen = new Set();
+  for (const it of excluded.items) {
+    if (!it || typeof it !== 'object') { bad('excluded.json 含非物件項目'); continue; }
+    if (typeof it.id !== 'string' || !it.id.trim()) { bad(`excluded.json 含空或非字串 id：${JSON.stringify(it.id)}`); continue; }
+    if (seen.has(it.id)) bad(`excluded.json 的 id 重複：${it.id}`);
+    seen.add(it.id);
+    if (!/^Q[1-5]$/.test(it.stage)) bad(`${it.id} 的 stage 值域外：${JSON.stringify(it.stage)}`);
+    if (poolIds.has(it.id)) bad(`${it.id} 同時出現在 pool 與 excluded，違反互斥`);
+  }
+
+  // 配對識別以 content_hash 為準，不是日期——同日重編日期不變而內容變了
+  if (meta.content_hash !== pool?.meta?.content_hash) {
+    bad(`兩檔的 content_hash 不成對：pool=${pool?.meta?.content_hash} excluded=${meta.content_hash}`);
+  }
+
+  if (srcIds) {
+    const union = poolIds.size + seen.size;
+    if (union !== srcIds.size) {
+      bad(`pool(${poolIds.size}) + excluded(${seen.size}) = ${union}，` +
+          `與來源去重後的 ${srcIds.size} 不符——有品項在兩份輸出中都不見了`);
+    }
+  }
+  return errs;
+}
+
+/**
+ * 驗證成對後建 `id → stage` 索引。**任一不變量不成立即拋錯，不回傳半套索引**。
+ *
+ * D49：單筆損毀＝整份不可用。半套的分類資料會產生錯誤的排除原因，比沒有分類更糟——
+ * 少掉的那幾筆會靜默落入第三類，畫面上顯示「不在外觀資料集中」，
+ * 而它們其實在資料集裡、只是被某個 Q stage 篩掉。
+ *
+ * @throws {FormularyError} code = 'EXCLUDED_UNUSABLE'，`.errors` 帶完整清單
+ */
+export function buildExcludedIndex(pool, excluded) {
+  const errs = validatePair(pool, excluded, null);
+  if (errs.length) {
+    const e = new FormularyError('EXCLUDED_UNUSABLE',
+      `excluded.json 不可用（${errs.length} 項）：${errs[0]}`);
+    e.errors = errs;
+    throw e;
+  }
+  return new Map(excluded.items.map((it) => [it.id, it.stage]));
+}
+
+// ── D37／D37.1 四分類 ───────────────────────────────────────────────
+
+/** 內部代碼。**「查無此證」這個措辭在任何使用者可見之處都不得出現**（D37.1） */
+export const Category = Object.freeze({
+  MATCHED: 'MATCHED',
+  NON_SOLID_ORAL: 'NON_SOLID_ORAL',   // 第一類：Q1
+  LOW_QUALITY: 'LOW_QUALITY',         // 第二類：Q4／Q5／Q3／Q2
+  UNLISTED: 'UNLISTED',               // 第三類
+});
+
+/**
+ * D37／D37.1 的顯示名稱。**措辭是規格的一部分，不得就地改寫**。
+ *
+ * 第二類的名稱必須如實涵蓋 Q3（品名過短），不得只寫「無圖或無刻字」；
+ * 措辭順序依實際規模排列（Q4 佔第二類 90%，排最前）。
+ * 第三類**絕對不能**暗示「使用者打錯了」——來源是一份**口服**藥品外觀資料集，
+ * 針劑／外用／眼藥完全不在其中，教學藥師會看到數百筆天天在用的針劑被標成「請核對」。
+ * 且本工具**無法區分**「合法但非口服」與「字號真的打錯」，做不到的區分就不得假裝做得到。
+ */
+export const CATEGORY_LABEL = Object.freeze({
+  [Category.MATCHED]: '可出題',
+  [Category.NON_SOLID_ORAL]: '口服但非固體（液劑／糖漿用粉劑／顆粒散劑等）',
+  [Category.LOW_QUALITY]: '題目品質不足（無刻字／外觀與他藥不可區分／品名過短／無外觀圖）',
+  [Category.UNLISTED]:
+    '不在外觀資料集中（多為針劑、外用、眼藥等非口服劑型；也可能是已下市或字號誤植）',
+});
+
+/** stage → 類別。值域封閉於 Q1–Q5（D49 不變量 5，由 `validatePair` 把關） */
+const STAGE_CATEGORY = Object.freeze({
+  Q1: Category.NON_SOLID_ORAL,
+  Q2: Category.LOW_QUALITY,
+  Q3: Category.LOW_QUALITY,
+  Q4: Category.LOW_QUALITY,
+  Q5: Category.LOW_QUALITY,
+});
+
+/** canonical id 為 BMP 字元，code unit 序即 code point 序（D38.3 的子集排序同此） */
+const byCodePoint = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+/**
+ * D37 四分類。**先切 token（D35.1）再呼叫本函式**，本函式不負責 tokenize。
+ *
+ * 去重時點依 D34.2a：**正規化之後、編碼之前**。去重鍵為 canonical id；
+ * 正規化失敗者退回 `foldToken()` 的結果（見該函式的說明）。
+ *
+ * 第三類的顯示字串：正規化成功者用 canonical id，失敗者用**原 token**（trim 過）。
+ * D43 要求「未命中的 id 若要顯示或下載須經 D35.2 正規化」——但未知前綴的 token
+ * 正規化不出東西，而 C50 明定它仍必須出現在畫面與下載資料中，
+ * 因此保留原字串並由呼叫端**只經純文字 sink** 輸出。
+ *
+ * `excludedStages` **必填**。少了它，全部 Q1–Q5 品項會靜默落入第三類，
+ * 而第三類的顯示名稱是「不在外觀資料集中」——那對那些藥是不實的。
+ *
+ * @param {Iterable<string>} tokens D35.1 切出的 token（未正規化、未去重）
+ * @param {{poolIds: Set<string>, excludedStages: Map<string,string>}} refs
+ */
+export function classifyFormulary(tokens, { poolIds, excludedStages } = {}) {
+  if (!(poolIds instanceof Set)) fail('BAD_POOL_IDS', 'poolIds 必須是 Set');
+  if (!(excludedStages instanceof Map)) {
+    fail('BAD_EXCLUDED_INDEX', 'excludedStages 必須是 Map（缺它會讓 Q1–Q5 品項全被誤歸第三類）');
+  }
+
+  // 去重：鍵 → { id, raw }。同一 id 的多個寫法只留第一次出現的原字串
+  const seen = new Map();
+  let blank = 0;
+  for (const raw of tokens) {
+    const folded = foldToken(raw);
+    if (!folded) { blank++; continue; }          // 空 token 不是品項，不計入任何類別
+    const id = normalizeLicense(raw);
+    const key = id ?? folded;
+    if (!seen.has(key)) seen.set(key, { id, raw: String(raw).trim() });
+  }
+
+  const matched = [];
+  const nonSolidOral = [];
+  const lowQuality = [];
+  const unlisted = [];
+  const byStage = { Q1: [], Q2: [], Q3: [], Q4: [], Q5: [] };
+
+  for (const key of [...seen.keys()].sort(byCodePoint)) {
+    const { id, raw } = seen.get(key);
+    // pool 優先於 excluded：兩者交集為空是 D49 不變量 4，但這裡不假設它成立——
+    // 真的重疊時把該品項當可出題（保守方向：不會把出得了題的藥標成排除）
+    if (id && poolIds.has(id)) { matched.push(id); continue; }
+    const stage = id ? excludedStages.get(id) : undefined;
+    if (stage === undefined) { unlisted.push(id ?? raw); continue; }
+    const cat = STAGE_CATEGORY[stage];
+    if (!cat) fail('BAD_STAGE', `stage 值域外：${JSON.stringify(stage)}（id ${id}）`);
+    byStage[stage].push(id);
+    (cat === Category.NON_SOLID_ORAL ? nonSolidOral : lowQuality).push(id);
+  }
+
+  return {
+    matched,
+    nonSolidOral,
+    lowQuality,
+    unlisted,
+    byStage,
+    /** D34.1：payload 只帶「來源已知」的 id ＝ 命中 ∪ excluded 內的 */
+    payloadIds: [...matched, ...nonSolidOral, ...lowQuality].sort(byCodePoint),
+    /** D34.2a：去重後既不在 pool 也不在 excluded 者的個數 */
+    unlistedCount: unlisted.length,
+    /** 相異非空 token 數。四類之和恆等於此值 */
+    distinct: seen.size,
+    /** 折疊後為空的 token 數。**不屬於任何一類**，但也不靜默丟掉 */
+    blank,
+  };
+}
+
+// ── D38 級別可用性＝實際組得出卷 ─────────────────────────────────────
+
+/** D38.1：最小卷長。短於此就不值得出（一回合太短，逐題檢討沒有意義） */
+export const MIN_QUIZ_LEN = 10;
+
+/**
+ * 該級每題需要的**卷外**誘答鍵數（D38.1）。
+ *
+ * **不直接用 `engine.js` 的 `needDistractors`**：那支對 L3 回 3（它只在非 L3 路徑
+ * 被呼叫，所以引擎內沒問題），這裡的語意是「卷長要扣掉幾個鍵」，L3 必須是 0。
+ * 常數本身仍取自引擎的 `CHOICE_COUNT`／`DISTRACTOR_COUNT`，不另抄數字。
+ */
+export function distractorNeed(level) {
+  if (level === Level.L3) return 0;
+  if (level === Level.L2) return DISTRACTOR_COUNT;
+  if (level === Level.L1) return CHOICE_COUNT - 1;
+  return fail('BAD_LEVEL', `未知級別：${JSON.stringify(level)}`);
+}
+
+/** D38.1：該級的最小可用 K（L1 13／L2 15／L3 10） */
+export const minUsableK = (level) => MIN_QUIZ_LEN + distractorNeed(level);
+
+/**
+ * D38.1：該級在 K 個可出題答案鍵下的目標卷長 `min(20, K − need)`。
+ *
+ * 為什麼不是 K：`buildChoices` 的 `excludeAns` 恆為**整卷正解集合**（H2），
+ * 誘答只能從卷外的答案鍵取。卷長＝K 時 `excludeAns` 吃掉全部 K 個鍵，
+ * 誘答一個都抽不到——而規格同時禁止重複題與跨子集誘答，那條路是死的。
+ */
+export const quizLenFor = (level, K) => Math.min(QUIZ_SIZE, K - distractorNeed(level));
+
+/**
+ * D38.3 seed 協定（封閉契約）：`CRC-32(payload ‖ "|" ‖ level)`，與 `Math.random` 無關。
+ *
+ * 相同 payload ＋ 相同 pool ＋ 相同 level 必須得到相同的可用性判定與**相同的第一卷**。
+ * 否則會出現「檢查時可用、按下去失敗」與「重整後按鈕忽隱忽現」。
+ */
+export function formularySeed(payload, level) {
+  if (typeof payload !== 'string') fail('BAD_PAYLOAD', 'seed 需要 payload 字串');
+  distractorNeed(level);                       // 級別值域檢查（未知級別直接拋）
+  return crc32(new TextEncoder().encode(`${payload}|${level}`));
+}
+
+/**
+ * 由當前 `pool.json` 與清單 id 集合準備出題子集（D36 ＋ D41）。
+ *
+ * **子集化是 D36 的核心**：誘答與正解都只從院內品項抽——院內藥師真正會混淆的，
+ * 是架上同時存在的兩顆藥。因此本函式回傳的 `index` 是**只含子集**的索引，
+ * 出題路徑一律走它，全庫索引不得洩漏進來。
+ *
+ * D41：`missing` 是清單中已不在最新資料的 id。**呼叫端不得用它覆寫持久化的 payload**
+ * ——覆寫會讓品項日後重新出現時也回不來。
+ *
+ * @param {object[]} poolItems 當前 `pool.json` 的 `items`（全庫）
+ * @param {Iterable<string>} matchedIds 清單解出的 canonical id
+ */
+export function prepareFormulary(poolItems, matchedIds) {
+  const want = matchedIds instanceof Set ? matchedIds : new Set(matchedIds);
+  // D38.3：餵進 buildIndex 前依 canonical id 昇冪排序——buildIndex 的
+  // `byAns` 陣列順序會影響 RNG 的取樣結果，輸入順序不定就談不上可重現
+  const items = poolItems.filter((it) => want.has(it.id)).sort((a, b) => byCodePoint(a.id, b.id));
+  const present = new Set(items.map((it) => it.id));
+  return {
+    items,
+    index: buildIndex(items),
+    N: items.length,
+    missing: [...want].filter((id) => !present.has(id)).sort(byCodePoint),
+  };
+}
+
+/**
+ * D38.2 單一級別的可用性判定。**`eligibleKeys().size` 不是可用性證據。**
+ *
+ * `eligibleKeys()` 是逐鍵局部判定（`recordEligible` 不看整卷脈絡），而
+ * `drawLeveledQuiz` 的 `excludeAns` 恆為整卷正解集合（H2）——因此
+ * `.size ≥ n` 與「能組出 n 題」之間**沒有蘊含關係**。真正的證據只有一個：
+ * **實際組出來，且 `validateQuizInvariants()` 回空**。
+ *
+ * 成功時回傳的 `quiz` **就是使用者按下開始後要用的那一卷**（D38.3），
+ * 不得在開始時重抽——重抽等於把這裡的判定作廢，「檢查時成功、開始時失敗」會復發。
+ *
+ * @returns {{level, K, quizLen, available, quiz, code, reason, violations?}}
+ */
+export function probeLevel({ payload, level, items, index }) {
+  const idx = index || buildIndex(items);
+  const eligible = eligibleKeys(idx, level);
+  const K = eligible.size;
+  const minK = minUsableK(level);
+  const out = { level, K, quizLen: 0, available: false, quiz: null, code: null, reason: null };
+
+  // 1. 快速前置拒絕（便宜，不必組卷）
+  if (K < minK) {
+    return { ...out, code: 'K_BELOW_MIN', reason: `可出題答案鍵 ${K} 個，未達最低 ${minK} 個` };
+  }
+
+  // 2. 真正的證據：以目標卷長實際組卷
+  const n = quizLenFor(level, K);
+  const rng = makeRng(formularySeed(payload, level));
+  let quiz;
+  try {
+    quiz = drawLeveledQuiz(items, { level, n, rng, index: idx, eligible });
+  } catch (e) {
+    // 組卷在允許的重試次數內仍失敗 → 該級禁用。**不得以重複題或跨子集誘答救場**
+    return { ...out, quizLen: n, code: e.code || 'QUIZ_ASSEMBLY_FAILED', reason: `組卷失敗（${e.code}）` };
+  }
+  // D38.2 明定「成功**且** validateQuizInvariants() 回空」才算可用，所以這道檢查留著。
+  // **誠實標明**：它今天不可能觸發——`drawLeveledQuiz` 內部的 `assertQuizInvariants`
+  // 已用同一組 (level, index) 硬中止，違規會以 `INVARIANT_VIOLATED` 從上面的 catch 出去。
+  // 變異驗證確認過這條分支無法被任何輸入轉紅（M12），它是「引擎哪天拿掉內部斷言」
+  // 的第二道防線，不是本層的實際判定依據。測試側改以**獨立重建的 index** 驗證題卷，
+  // 那條才是真的會紅的斷言。
+  const violations = validateQuizInvariants(quiz, { level, index: idx });
+  if (violations.length) {
+    // 訊息本身含藥名，不可直接給使用者——只回代碼，明細留在 violations
+    return { ...out, quizLen: n, code: 'INVARIANT_VIOLATED', reason: `不變量違規 ${violations.length} 項`, violations };
+  }
+  return { ...out, quizLen: n, available: true, quiz };
+}
+
+/**
+ * 三級一起判定（D38）。三級全部禁用時呼叫端才拒絕產生連結／要求重新產生。
+ *
+ * 為什麼不用統一門檻：實測 L2 在 60 品項以下就撐不住，L1／L3 到 20 品項都還可用。
+ * 統一硬擋會讓「換廠批次 30 品項」這個真實情境永遠用不了。
+ */
+export function probeFormulary({ payload, poolItems, matchedIds, levels = [Level.L1, Level.L2, Level.L3] }) {
+  const prep = prepareFormulary(poolItems, matchedIds);
+  const byLevel = {};
+  for (const lv of levels) {
+    byLevel[lv] = probeLevel({ payload, level: lv, items: prep.items, index: prep.index });
+  }
+  return { ...prep, levels: byLevel, anyAvailable: Object.values(byLevel).some((r) => r.available) };
 }

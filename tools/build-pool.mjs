@@ -16,7 +16,7 @@ import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { normalize, squash, editDistance, FUZZY_MIN_LEN } from '../engine.js';
-import { PREFIX_TABLE } from '../formulary.js';
+import { PREFIX_TABLE, validatePair } from '../formulary.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SOURCE_URL = 'https://data.fda.gov.tw/data/opendata/export/42/json';
@@ -277,59 +277,17 @@ function buildPool(rows) {
 const KNOWN_PREFIXES = new Set(PREFIX_TABLE.map((e) => e.prefix));
 
 /**
- * D49 的成對不變量。**回傳錯誤清單（空陣列＝通過），不拋例外**——
- * `verify-data` 要一次列出全部問題，不是遇到第一個就停。
+ * D49 的成對不變量。**實作在 `formulary.js`**（v5 批次 3 搬過去的）。
  *
- * 抽出來的理由（覆審發現 3／5／6）：原本這段內聯在 `main()` 裡，而 `excludedPayload`
- * 的 `content_hash` 是**上一行才從 `payload` 複製過去的**，於是「兩檔 hash 不一致」
- * 這條檢查在正常執行中**永遠不成立**——是死碼。拿掉它整段，測試仍全綠（已實跑確認）。
+ * 搬家理由：前端載入 `excluded.json` 時要做**同一套**檢查（D47：任一檔失敗即停用
+ * 產連結功能），而 `build-pool.mjs` import 了 `node:fs`，瀏覽器 import 不了。
+ * 在前端另寫一份必然漂移，而漂移的後果是「管線拒絕發布的資料，前端卻拿來分類」。
+ * 沿用「正規化只有一份」的既有紀律。
  *
- * 抽成純函式後它才有真實輸入：`verify-data` 餵的是**磁碟上兩份獨立讀進來的檔案**，
- * 那裡的 hash 真的可能不一致（只更新其中一份、手動改過、部署到不同版本）。
- *
- * @param {object} pool      `pool.json` 的完整內容
- * @param {object} excluded  `excluded.json` 的完整內容
- * @param {Set<string>|null} srcIds 來源去重後的 id 集合；`null` 表示跳過聯集檢查
- * @returns {string[]} 錯誤訊息清單
+ * 這裡保留 re-export：`verify-data.mjs` 與 `tests/pipeline.test.mjs` 的既有 import
+ * 不必跟著改，管線側的呼叫點也維持原樣。
  */
-export function validatePair(pool, excluded, srcIds = null) {
-  const errs = [];
-  const bad = (m) => errs.push(m);
-
-  if (!excluded || typeof excluded !== 'object') return ['excluded.json 不是物件'];
-  const meta = excluded.meta;
-  if (!meta || typeof meta !== 'object') return ['excluded.json 缺 meta（D49 要求 { meta, items }）'];
-  if (meta.schema !== 1) bad(`excluded.json 的 schema 未知：${JSON.stringify(meta.schema)}`);
-  if (!Array.isArray(excluded.items)) return ['excluded.json 的 items 不是陣列'];
-  if (meta.count !== excluded.items.length) {
-    bad(`excluded.json 的 count(${meta.count}) 與 items.length(${excluded.items.length}) 不符`);
-  }
-
-  const poolIds = new Set((pool?.items ?? []).map((i) => i.id));
-  const seen = new Set();
-  for (const it of excluded.items) {
-    if (!it || typeof it !== 'object') { bad('excluded.json 含非物件項目'); continue; }
-    if (typeof it.id !== 'string' || !it.id.trim()) { bad(`excluded.json 含空或非字串 id：${JSON.stringify(it.id)}`); continue; }
-    if (seen.has(it.id)) bad(`excluded.json 的 id 重複：${it.id}`);
-    seen.add(it.id);
-    if (!/^Q[1-5]$/.test(it.stage)) bad(`${it.id} 的 stage 值域外：${JSON.stringify(it.stage)}`);
-    if (poolIds.has(it.id)) bad(`${it.id} 同時出現在 pool 與 excluded，違反互斥`);
-  }
-
-  // 配對識別以 content_hash 為準，不是日期——同日重編日期不變而內容變了
-  if (meta.content_hash !== pool?.meta?.content_hash) {
-    bad(`兩檔的 content_hash 不成對：pool=${pool?.meta?.content_hash} excluded=${meta.content_hash}`);
-  }
-
-  if (srcIds) {
-    const union = poolIds.size + seen.size;
-    if (union !== srcIds.size) {
-      bad(`pool(${poolIds.size}) + excluded(${seen.size}) = ${union}，` +
-          `與來源去重後的 ${srcIds.size} 不符——有品項在兩份輸出中都不見了`);
-    }
-  }
-  return errs;
-}
+export { validatePair };
 
 /**
  * B13 前綴表完整性 —— **掃來源全部列，不是掃存活品項**。
