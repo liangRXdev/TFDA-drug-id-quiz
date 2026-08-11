@@ -23,12 +23,13 @@ import {
   PREFIX_TABLE, FORMAT_VERSION, PREFIX_TABLE_VERSION,
   normalizeLicense, tokenize, encodeFormulary, decodeFormulary, crc32,
   FormularyError,
-  Category, CATEGORY_LABEL, classifyFormulary, buildExcludedIndex,
+  Category, CATEGORY_LABEL, classifyFormulary, buildExcludedIndex, validatePair,
   MIN_QUIZ_LEN, distractorNeed, minUsableK, quizLenFor, formularySeed,
   prepareFormulary, probeLevel, probeFormulary,
 } from '../formulary.js';
 import {
   Level, QUIZ_SIZE, buildIndex, eligibleKeys, nameCollides, makeRng, validateQuizInvariants,
+  buildChoices,
 } from '../engine.js';
 import { COLLISION_GROUPS, PREFIX_SAMPLES } from './_license-fixtures.mjs';
 
@@ -578,6 +579,32 @@ function allQuizIds(quiz) {
 
 const payloadOf = (items) => encodeFormulary(items.map((it) => it.id), 0);
 
+/**
+ * pool-only sentinel：**只存在於全庫、不在院內子集**的品項。
+ *
+ * 它們的外觀（圓形／白）與 `mkDisjointItems` 的任何一筆都不相交、刻字互異，
+ * 因此對 L1 與 L2 **都是合法的誘答候選**——這正是「誤用全庫 index」時它們會被抽中的原因。
+ * id 以「內」開頭（U+5167 < U+885B），在 canonical 排序中恆在子集之前。
+ *
+ * **這裡不宣稱「排序靠前所以一定先被選到」**（原註解這樣寫是錯的）：
+ * `engine.js` 的 `pickMutuallyValid()` 進來第一件事就是 `shuffle(c, rng)`，候選順序會被洗掉。
+ * sentinel 的守備力來自「它們**根本不該進入索引**」，而陷阱有沒有裝上由下方的
+ * **正向對照**測試證明（誤用全庫 index 時必定選中），不是靠註解宣稱。
+ */
+function mkSentinels(n = 8) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    out.push({
+      id: `內衛成製字第${String(i + 1).padStart(6, '0')}號`,
+      ans: codeName(200 + i),
+      shape: ['圓形'], color: ['白'],
+      score_mark: ['無'], size: '8', mark1: `ZZ${i}`, mark2: null,
+      img: `img/sentinel${i}.webp`,
+    });
+  }
+  return out;
+}
+
 // ════════════════════════════════════════════════════════════════════
 describe('A41 出題品項封閉於子集（防 vacuous pass）', () => {
   // 〔堵〕(a) 空卷讓逐題斷言 vacuous pass；(b) 隨機抽樣剛好沒抽到洩漏品項；
@@ -586,19 +613,7 @@ describe('A41 出題品項封閉於子集（防 vacuous pass）', () => {
     const subset = mkDisjointItems(30, { idFrom: 100, nameFrom: 0 });
     const l2subset = mkL2Items(30, { idFrom: 100, nameFrom: 0 });
 
-    // sentinel：**只存在於全庫**。id 以「內」開頭 ⇒ 排序恆在子集之前（子集排序若
-    // 沒做、或索引誤用全庫，它會是最早被看到的候選）。外觀與所有子集品項都不相交、
-    // 刻字互異 ⇒ 對 L1／L2 都是「合法且優先」的誘答
-    const sentinels = [];
-    for (let i = 0; i < 8; i++) {
-      sentinels.push({
-        id: `內衛成製字第${String(i + 1).padStart(6, '0')}號`,
-        ans: codeName(200 + i),
-        shape: ['圓形'], color: ['白'],
-        score_mark: ['無'], size: '8', mark1: `ZZ${i}`, mark2: null,
-        img: `img/sentinel${i}.webp`,
-      });
-    }
+    const sentinels = mkSentinels();
 
     for (const [level, base] of [[Level.L1, subset], [Level.L2, l2subset], [Level.L3, subset]]) {
       const full = [...sentinels, ...base];              // sentinel 排在最前面
@@ -627,6 +642,38 @@ describe('A41 出題品項封閉於子集（防 vacuous pass）', () => {
         assert.ok(matchedIds.has(q.item.id));
         for (const o of q.options || []) assert.ok(matchedIds.has(o.id));
         for (const sp of q.spares || []) assert.ok(matchedIds.has(sp.id));
+      }
+    }
+  });
+
+  test('正向對照：陷阱確實有裝上——誤用全庫 index 時 sentinel 必被選中', () => {
+    // 依 codex-review 發現 4 新增。上一條測「sentinel 沒出現」，但**沒有任何斷言
+    // 證明它出得來**——若 sentinel 因外觀或名稱條件而永遠不可能成為候選，
+    // 那條就只是在驗一件恆真的事（M5 的 M-16 同型：判準漏了自己不知道）。
+    //
+    // 這裡以**受控 RNG** 直接呼叫 `buildChoices()` 並餵**全庫 index**（＝錯誤實作），
+    // 且把整個子集放進 excludeAns（H2 在滿卷時就是這個樣子）——此時唯一的合法候選
+    // 就是 sentinel。選得到，證明陷阱是活的；選不到，代表上一條測試在驗空氣。
+    const sentinels = mkSentinels();
+    const sentinelIds = new Set(sentinels.map((s) => s.id));
+
+    // L2 的候選必須同形同色，因此 L2 的 base 要用 mkL2Items（圓形／白），
+    // 與 sentinel 同形同色而刻字互異——這才是 L2 真正的誘答條件
+    for (const [level, base] of [
+      [Level.L1, mkDisjointItems(30, { idFrom: 100 })],
+      [Level.L2, mkL2Items(30, { idFrom: 100 })],
+    ]) {
+      const fullIndex = buildIndex([...sentinels, ...base]);
+      const choice = buildChoices(base[0], fullIndex, {
+        level,
+        rng: makeRng(7),
+        excludeAns: new Set(base.map((b) => b.ans)),
+      });
+      const picked = [...choice.options, ...choice.spares].filter((o) => o !== base[0]);
+      assert.ok(picked.length > 0);
+      for (const p of picked) {
+        assert.ok(sentinelIds.has(p.id),
+          `${level} 的誘答 ${p.id} 不是 sentinel——這個對照沒有把候選逼到只剩 sentinel`);
       }
     }
   });
@@ -751,35 +798,58 @@ describe('A42 可用性判定：級別特定邊界＋真的組得出卷＋可重
     }
   });
 
-  test('D38.3 可重現：同 payload ＋同子集 ＋同 level → 同判定、同第一卷（≥5 次）', () => {
-    const items = mkDisjointItems(30);
-    const payload = payloadOf(items);
-    const first = probeLevel({ payload, level: Level.L1, items });
-    assert.equal(first.available, true);
-    for (let i = 0; i < 5; i++) {
-      const r = probeLevel({ payload, level: Level.L1, items });
-      assert.equal(r.available, first.available);
-      assert.equal(r.K, first.K);
-      assert.deepEqual(quizIdentity(r.quiz), quizIdentity(first.quiz),
-        '同一 payload 必須得到相同的第一卷，否則會「檢查時可用、按下去失敗」');
-    }
-  });
+  /**
+   * 三級**各一個確定可組卷**的 fixture（依 codex-review 發現 3 新增）。
+   *
+   * 原本可重現性只驗 L1。**已實跑確認**：把 `probeLevel` 改成「只有 L2 用
+   * `Math.random`」，105 條測試全綠——因為 ≥5 次比對與 `Math.random` 隔離都只跑 L1，
+   * 子集排序那條的 L2 fixture 恆為不可用所以不比第一卷，A41／A43 的 L2 各只跑一次。
+   * D38.3 是「檢查時可用、按下去失敗」的唯一防線，只守 L1 等於守三分之一。
+   */
+  const REPRO = () => [
+    [Level.L1, mkDisjointItems(30)],
+    [Level.L2, mkL2Items(30)],
+    [Level.L3, mkDisjointItems(30)],
+  ];
 
-  test('D38.3 seed 只由 payload 與 level 決定，與 Math.random 無關', () => {
-    const items = mkDisjointItems(30);
-    const payload = payloadOf(items);
-    // 不同 level → 不同 seed（否則三級的第一卷會是同一組抽樣）
+  for (const [level] of REPRO()) {
+    test(`D38.3 可重現（${level}）：同 payload ＋同子集 → 同判定、同第一卷（≥5 次）`, () => {
+      const items = REPRO().find(([lv]) => lv === level)[1];
+      const payload = payloadOf(items);
+      const first = probeLevel({ payload, level, items });
+      assert.equal(first.available, true, `${level} fixture 必須可組卷，否則這條在驗空氣`);
+      for (let i = 0; i < 5; i++) {
+        const r = probeLevel({ payload, level, items });
+        assert.equal(r.available, first.available);
+        assert.equal(r.K, first.K);
+        assert.equal(r.quizLen, first.quizLen);
+        assert.deepEqual(quizIdentity(r.quiz), quizIdentity(first.quiz),
+          '同一 payload 必須得到相同的第一卷，否則會「檢查時可用、按下去失敗」');
+      }
+    });
+
+    test(`D38.3 seed 與 Math.random 無關（${level}）`, () => {
+      const items = REPRO().find(([lv]) => lv === level)[1];
+      const payload = payloadOf(items);
+      const before = Math.random;
+      try {
+        Math.random = () => 0.5;
+        const a = probeLevel({ payload, level, items });
+        Math.random = () => 0.9;
+        const b = probeLevel({ payload, level, items });
+        Math.random = () => { throw new Error('probe 不得呼叫 Math.random'); };
+        const c = probeLevel({ payload, level, items });
+        assert.equal(a.available, true);
+        assert.deepEqual(quizIdentity(b.quiz), quizIdentity(a.quiz));
+        assert.deepEqual(quizIdentity(c.quiz), quizIdentity(a.quiz));
+      } finally { Math.random = before; }
+    });
+  }
+
+  test('D38.3 三級的 seed 互不相同（否則三級抽出同一組題）', () => {
+    const payload = payloadOf(mkDisjointItems(30));
     const seeds = [Level.L1, Level.L2, Level.L3].map((lv) => formularySeed(payload, lv));
     assert.equal(new Set(seeds).size, 3);
-    const before = Math.random;
-    try {
-      Math.random = () => 0.5;
-      assert.deepEqual([Level.L1, Level.L2, Level.L3].map((lv) => formularySeed(payload, lv)), seeds);
-      const a = probeLevel({ payload, level: Level.L1, items });
-      Math.random = () => 0.9;
-      const b = probeLevel({ payload, level: Level.L1, items });
-      assert.deepEqual(quizIdentity(a.quiz), quizIdentity(b.quiz));
-    } finally { Math.random = before; }
   });
 
   test('D38.3 子集排序：輸入順序不得影響判定與第一卷', () => {
@@ -803,6 +873,39 @@ describe('A42 可用性判定：級別特定邊界＋真的組得出卷＋可重
         assert.deepEqual(quizIdentity(b.levels[lv].quiz), quizIdentity(a.levels[lv].quiz));
       }
     }
+  });
+
+  test('未知錯誤必須重拋，不得降格成「該級不可用」', () => {
+    // 依 codex-review 發現 2 新增。原本 `catch (e)` 全攔：一個 TypeError 會被貼上
+    // 「組卷失敗」的標籤，使用者只看到級別按鈕變灰——真 bug 以靜默失效呈現。
+    // 這裡用「index 是好的、items 的外觀欄位被抽掉」逼出 TypeError：
+    // eligible 由好的 index 算出，poisoned 紀錄的 ans 仍在其中，於是必被抽為正解，
+    // 而 L1 的 candidateOk 會去讀 correct.shape
+    const good = mkDisjointItems(30);
+    const index = buildIndex(good);
+    const poisoned = good.map((it) => ({ ...it, shape: undefined }));
+    assert.throws(
+      () => probeLevel({ payload: payloadOf(good), level: Level.L1, items: poisoned, index }),
+      TypeError,
+      '未知錯誤被吞掉了——它應該以真面目炸出來');
+  });
+
+  test('可降級的失敗回固定文字，不含藥名也不含 undefined', () => {
+    const items = mkDisjointItems(9);          // K=9 < 13 → K_BELOW_MIN
+    const r = probeLevel({ payload: payloadOf(items), level: Level.L1, items });
+    assert.equal(r.available, false);
+    assert.ok(r.reason && !/undefined/.test(r.reason), `reason 不得含 undefined：${r.reason}`);
+    // 敵意子集走的是另一條（QUIZ_ASSEMBLY_FAILED），同樣不得出現 undefined
+    const A = Array.from({ length: 10 }, (_, i) => ({
+      id: synthId(1 + i), ans: codeName(i), shape: ['S0'], color: ['C0'],
+      score_mark: ['無'], size: '8', mark1: `A${i}`, mark2: null, img: `a${i}.webp` }));
+    const B = ['XXA', 'XXB', 'XXC'].map((ans, i) => ({
+      id: synthId(101 + i), ans, shape: ['S1'], color: ['C1'],
+      score_mark: ['無'], size: '8', mark1: `B${i}`, mark2: null, img: `b${i}.webp` }));
+    const h = probeLevel({ payload: 'x', level: Level.L1, items: [...A, ...B] });
+    assert.equal(h.code, 'QUIZ_ASSEMBLY_FAILED');
+    assert.ok(!/undefined/.test(h.reason), `reason 不得含 undefined：${h.reason}`);
+    for (const it of [...A, ...B]) assert.ok(!h.reason.includes(it.ans), 'reason 不得含藥名');
   });
 
   test('三級全禁用時 anyAvailable 為 false；D41 的 missing 不吞掉', () => {
@@ -967,6 +1070,10 @@ describe('A44 四分類逐 stage 精確 membership', () => {
       assert.ok(!label.includes('查無此證'), '「查無此證」不得出現在使用者可見之處');
       assert.ok(!label.includes('請核對'));
     }
+    // S-2：命中類的標籤是 **N** 的標籤，不得承諾出題能力——K 由級別決定，
+    // L2 的 K 常比 N 少三成。規格名詞表：任何 UI 文字不得用 N 代替 K
+    assert.ok(!CATEGORY_LABEL[Category.MATCHED].includes('可出題'),
+      '命中類的標籤不得寫「可出題」，那是 K 的語意');
     const u = CATEGORY_LABEL[Category.UNLISTED];
     assert.ok(u.includes('不在外觀資料集中'));
     assert.ok(u.includes('針劑') && u.includes('外用') && u.includes('眼藥'));
@@ -1019,5 +1126,43 @@ describe('A44 四分類逐 stage 精確 membership', () => {
     // hash 不成對也是整份不可用（D47：產連結停用，出題不受影響）
     const mismatched = { meta: { ...EXCLUDED.meta, content_hash: 'sha256:0' }, items: EXCLUDED.items };
     throwsCode(() => buildExcludedIndex(POOL, mismatched), 'EXCLUDED_UNUSABLE');
+  });
+
+  test('D49：join key 必須是 canonical——兩側都驗（codex-review 發現 1／自查 S-1）', () => {
+    // 〔堵〕只驗「非空字串」。實跑重現過：`衛署藥製字第21號` 進 excluded 後
+    //       `validatePair()` 回空陣列，而使用者打對的 `衛署藥製字第000021號`
+    //       被分到第三類，畫面對一顆確實在資料集裡的藥說「不在外觀資料集中」
+    const hash = 'sha256:abc';
+    const okPool = { meta: { content_hash: hash }, items: [{ id: synthId(11) }] };
+    const mkEx = (id) => ({ meta: { schema: 1, content_hash: hash, count: 1 }, items: [{ id, stage: 'Q1' }] });
+
+    const BAD_IDS = [
+      ['缺前導零', '衛署藥製字第21號'],
+      ['前後空白', ' 衛署藥製字第000021號 '],
+      ['全形數字', '衛署藥製字第０００００２１號'],
+      ['缺「號」', '衛署藥製字第000021'],
+    ];
+    for (const [name, id] of BAD_IDS) {
+      const errs = validatePair(okPool, mkEx(id), null);
+      assert.ok(errs.some((e) => e.includes('canonical')),
+        `${name}（${id}）應被判為非 canonical，實得：${JSON.stringify(errs)}`);
+      throwsCode(() => buildExcludedIndex(okPool, mkEx(id)), 'EXCLUDED_UNUSABLE');
+    }
+    // 正面案例：canonical 的 id 不得誤擋
+    assert.deepEqual(validatePair(okPool, mkEx(synthId(21)), null), []);
+
+    // **pool 側同樣要驗**（Codex 只提了 excluded 側）：pool 的 id 直接取自來源欄位，
+    // 非 canonical 的 pool id 更糟——那顆藥可以出題，卻永遠進不了任何一份院內清單
+    const badPool = { meta: { content_hash: hash }, items: [{ id: '衛署藥製字第11號' }] };
+    const poolErrs = validatePair(badPool, mkEx(synthId(21)), null);
+    assert.ok(poolErrs.some((e) => e.includes('pool.json') && e.includes('canonical')),
+      `pool 側的非 canonical id 應被擋下，實得：${JSON.stringify(poolErrs)}`);
+  });
+
+  test('真實兩份資料的 id 全部是 canonical（今天成立，但沒有守衛就會漂）', () => {
+    needData();
+    assert.deepEqual(validatePair(POOL, EXCLUDED, null), []);
+    for (const it of POOL.items) assert.equal(normalizeLicense(it.id), it.id);
+    for (const it of EXCLUDED.items) assert.equal(normalizeLicense(it.id), it.id);
   });
 });

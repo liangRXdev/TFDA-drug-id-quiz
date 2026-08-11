@@ -288,8 +288,11 @@ function sourceRows({ keep = 6, filler = 5200 } = {}) {
   const rows = [];
   for (let i = 0; i < filler; i++) {
     rows.push({
-      // B13 起，前綴必須在 D34.4 的 18 種表內；`第F` 這種合成前綴會被管線中止
-      許可證字號: `衛部藥輸字第${String(i).padStart(6, '0')}號`,
+      // B13 起，前綴必須在 D34.4 的 18 種表內；`第F` 這種合成前綴會被管線中止。
+      // 號碼從 **1** 起：D34.3 明定絕對號碼 ≥1，`第000000號` 不是合法 canonical id，
+      // 編不進任何 payload（A40 把號碼 0 列為 grammar-invalid）。
+      // 批次 3 起 `validatePair()` 會擋，這裡跟著改才不是假資料
+      許可證字號: `衛部藥輸字第${String(i + 1).padStart(6, '0')}號`,
       英文品名: `FILLER INJECTION ${i}`,
       外觀圖檔連結: `https://example.invalid/f${i}.jpg`,
       形狀: '注射劑',                  // ← Q1 濾掉
@@ -299,7 +302,7 @@ function sourceRows({ keep = 6, filler = 5200 } = {}) {
   const NAMES = ['ALFATIN', 'BRAVOZOL', 'CHARLIDINE', 'DELTAMOX', 'ECHOPRIL', 'FOXTROLOL'];
   for (let i = 0; i < keep; i++) {
     rows.push({
-      許可證字號: `衛部藥製字第${String(i).padStart(6, '0')}號`,
+      許可證字號: `衛部藥製字第${String(i + 1).padStart(6, '0')}號`,
       英文品名: `${NAMES[i % NAMES.length]} TABLETS ${i} MG`,
       中文品名: `測試錠 ${i}`,
       外觀圖檔連結: `https://example.invalid/k${i}.jpg`,

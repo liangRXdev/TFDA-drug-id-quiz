@@ -463,11 +463,34 @@ export function validatePair(pool, excluded, srcIds = null) {
     bad(`excluded.json 的 count(${meta.count}) 與 items.length(${excluded.items.length}) 不符`);
   }
 
-  const poolIds = new Set((pool?.items ?? []).map((i) => i.id));
+  // **join key 必須是 canonical**（依 codex-review 發現 1 與主持人自查 S-1 新增）。
+  //
+  // D34 的比對是**整串字串相等**：使用者輸入先過 `normalizeLicense()`，再與這兩份檔案的
+  // id 做 Set／Map lookup。任一側存了非 canonical 的寫法（缺前導零、前後空白、全形數字），
+  // 那筆藥就**永遠比不中**，而畫面會說它「不在外觀資料集中」——D37.1 明文說那句話
+  // 對確實在資料集裡的藥是不實的。已實跑重現：`衛署藥製字第21號` 進 excluded 後，
+  // 使用者打對的 `衛署藥製字第000021號` 被分到第三類。
+  //
+  // **兩份都要驗，不是只驗 excluded**：`tools/build-pool.mjs` 的 `id` 直接取來源的
+  // `許可證字號` 欄位（連 trim 都沒有）。pool 側若非 canonical 後果更重——那顆藥
+  // 可以出題，卻永遠進不了任何一份院內清單。2026-08-10 實測 3941＋2354 筆全部通過，
+  // 因此這是**潛在**而非現行缺陷；但月更會換資料，join key 不能沒有守衛。
+  const notCanonical = (where, id) =>
+    bad(`${where} 的 id 不是 canonical 藥證字號：${JSON.stringify(id)}`);
+
+  const poolIds = new Set();
+  for (const it of pool?.items ?? []) {
+    const id = it?.id;
+    if (typeof id !== 'string' || !id) { bad(`pool.json 含空或非字串 id：${JSON.stringify(id)}`); continue; }
+    if (normalizeLicense(id) !== id) notCanonical('pool.json', id);
+    poolIds.add(id);
+  }
+
   const seen = new Set();
   for (const it of excluded.items) {
     if (!it || typeof it !== 'object') { bad('excluded.json 含非物件項目'); continue; }
     if (typeof it.id !== 'string' || !it.id.trim()) { bad(`excluded.json 含空或非字串 id：${JSON.stringify(it.id)}`); continue; }
+    if (normalizeLicense(it.id) !== it.id) notCanonical('excluded.json', it.id);
     if (seen.has(it.id)) bad(`excluded.json 的 id 重複：${it.id}`);
     seen.add(it.id);
     if (!/^Q[1-5]$/.test(it.stage)) bad(`${it.id} 的 stage 值域外：${JSON.stringify(it.stage)}`);
@@ -529,7 +552,9 @@ export const Category = Object.freeze({
  * 且本工具**無法區分**「合法但非口服」與「字號真的打錯」，做不到的區分就不得假裝做得到。
  */
 export const CATEGORY_LABEL = Object.freeze({
-  [Category.MATCHED]: '可出題',
+  // **不得寫「可出題」**（主持人自查 S-2）：這是 N（命中品項數）的標籤，而能不能出題
+  // 是各級的 K 決定的，L2 的 K 常比 N 少三成。規格名詞表明訂「任何 UI 文字不得用 N 代替 K」。
+  [Category.MATCHED]: '命中：在外觀資料集中',
   [Category.NON_SOLID_ORAL]: '口服但非固體（液劑／糖漿用粉劑／顆粒散劑等）',
   [Category.LOW_QUALITY]: '題目品質不足（無刻字／外觀與他藥不可區分／品名過短／無外觀圖）',
   [Category.UNLISTED]:
@@ -689,6 +714,19 @@ export function prepareFormulary(poolItems, matchedIds) {
 }
 
 /**
+ * 可以合理降級成「該級不可用」的失敗代碼。**不在表內的一律重拋**——
+ * 未知錯誤是 bug，把它降格成「該級不可用」會讓 bug 以一顆變灰的按鈕呈現。
+ */
+const DEGRADABLE_CODES = new Set(['QUIZ_ASSEMBLY_FAILED', 'INSUFFICIENT_KEYS', 'INVARIANT_VIOLATED']);
+
+/** 固定文字，**不含藥名**（引擎的錯誤訊息帶藥名，不可直接給使用者） */
+const DEGRADE_REASON = Object.freeze({
+  QUIZ_ASSEMBLY_FAILED: '這份清單湊不出足夠的誘答，無法組出整卷',
+  INSUFFICIENT_KEYS: '這份清單可出題的品項不足',
+  INVARIANT_VIOLATED: '組出的題卷未通過完整性檢查',
+});
+
+/**
  * D38.2 單一級別的可用性判定。**`eligibleKeys().size` 不是可用性證據。**
  *
  * `eligibleKeys()` 是逐鍵局部判定（`recordEligible` 不看整卷脈絡），而
@@ -720,8 +758,14 @@ export function probeLevel({ payload, level, items, index }) {
   try {
     quiz = drawLeveledQuiz(items, { level, n, rng, index: idx, eligible });
   } catch (e) {
-    // 組卷在允許的重試次數內仍失敗 → 該級禁用。**不得以重複題或跨子集誘答救場**
-    return { ...out, quizLen: n, code: e.code || 'QUIZ_ASSEMBLY_FAILED', reason: `組卷失敗（${e.code}）` };
+    // 組卷在允許的重試次數內仍失敗 → 該級禁用。**不得以重複題或跨子集誘答救場**。
+    //
+    // **只降級白名單內的失敗**（依 codex-review 發現 2）：原本 `catch (e)` 全攔，
+    // 於是 `TypeError`、索引結構損毀這類**真 bug** 會被貼上「該級不可用」的標籤，
+    // 使用者只看到級別按鈕變灰——那正是本專案最怕的靜默失效。
+    // 未知錯誤一律重拋，讓它以真面目炸出來。
+    if (!DEGRADABLE_CODES.has(e?.code)) throw e;
+    return { ...out, quizLen: n, code: e.code, reason: DEGRADE_REASON[e.code] };
   }
   // D38.2 明定「成功**且** validateQuizInvariants() 回空」才算可用，所以這道檢查留著。
   // **誠實標明**：它今天不可能觸發——`drawLeveledQuiz` 內部的 `assertQuizInvariants`
