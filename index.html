@@ -410,7 +410,17 @@ input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow:
     <!-- 院內版狀態（規格 V5 D34.1／C43）。通用版時整塊隱藏。
          N（命中品項）與 K（該級可出題藥名）是兩個數字，K 印在各級別卡上 -->
     <p class="fx-note hidden" id="startFxNote">院內版 ｜ 命中 <span class="n" id="sFxN">0</span>
-      品項<span id="sFxUnlisted"></span>｜院內版只顯示當回合分數，不計入最佳紀錄</p>
+      品項<span id="sFxUnlisted"></span>｜院內版只顯示當回合分數，不計入最佳紀錄
+      <button class="link" id="btnFxExit">切回全題庫</button></p>
+    <!-- 二次確認走頁內元素而不是 window.confirm——理由同「清除紀錄」：
+         瀏覽器 modal 會阻斷整個頁面，而且取消路徑無從自動驗證 -->
+    <div class="rec-confirm hidden" id="fxExitConfirm">
+      切回全題庫後，這份院內清單會從本瀏覽器移除。要再用得重新開一次連結。
+      <div class="btn-row" style="margin-top:0.4rem">
+        <button id="btnFxExitYes">確定切回</button>
+        <button id="btnFxExitNo" class="ghost">取消</button>
+      </div>
+    </div>
     <p class="fx-warn hidden" id="startFxWarn"></p>
 
     <div class="test-info" id="poolInfo" style="margin-top:0.9rem"></div>

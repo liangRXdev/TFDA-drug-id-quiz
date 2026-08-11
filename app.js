@@ -577,6 +577,32 @@ function bootFormulary() {
   renderFormularyState(bootError);
 }
 
+/**
+ * 退出院內版，切回全題庫。
+ *
+ * **規格沒有定義過這條路**（D40–D47 只講怎麼進來，沒講怎麼出去）——
+ * 那是規格缺口，不是刻意設計：`fx` 一旦載入就寫進 localStorage，
+ * 之後每次開站都會還原，使用者除了開 DevTools 刪 key 之外沒有出口。
+ *
+ * 移除只 `removeItem` **那一個精確 key**：不 `clear()`、不前綴掃描（既有紀律）。
+ * **移除失敗時不得宣稱成功**——清單其實還在，下次開啟又會冒出來（沿用 `clearRecords()`）。
+ *
+ * @returns {boolean} 是否真的移除了
+ */
+function exitFormulary() {
+  const ls = storage();
+  if (!ls) return false;
+  try { ls.removeItem(FORMULARY_KEY); } catch { return false; }
+
+  state.fxOp++;                       // D46：讓任何進行中的載入作廢
+  state.fx = null;
+  state.items = state.pool.items;
+  state.index = buildIndex(state.pool.items);
+  state.eligible = new Map();         // 索引換回全庫，可用鍵快取全部作廢
+  state.lookAlike = null;
+  return true;
+}
+
 /** 三級全部禁用（D41：此時要提示重新產生連結） */
 const fxAllDisabled = () => !!state.fx && LEVEL_ORDER.every((lv) => !state.fx.levels[lv].available);
 
@@ -615,6 +641,7 @@ function renderFormularyState(bootError = '') {
   const on = !!state.fx;
   renderPoolInfo();
   show($('startFxNote'), on);
+  if (!on) show($('fxExitConfirm'), false);       // 切回之後確認框不該留在畫面上
 
   const warn = bootError ? [bootError] : [];
   if (on) {
@@ -2264,6 +2291,24 @@ $('btnFxCopy').addEventListener('click', () => {
     $('fxCopied').textContent = '複製失敗，請手動選取';
     show($('fxCopied'));
   }
+});
+
+// 切回全題庫。二次確認同「清除紀錄」的作法
+$('btnFxExit').addEventListener('click', () => show($('fxExitConfirm')));
+$('btnFxExitNo').addEventListener('click', () => show($('fxExitConfirm'), false));
+$('btnFxExitYes').addEventListener('click', () => {
+  const ok = exitFormulary();
+  if (!ok) {
+    // 移除失敗時**不得切回**：記憶體切了但 storage 還在，重整又是院內版，
+    // 而畫面已經說「已切回」——那比不給出口更糟
+    $('startFxWarn').textContent = '無法從這個瀏覽器移除院內清單（儲存空間不可用），仍在院內版。';
+    show($('startFxWarn'));
+    show($('fxExitConfirm'), false);
+    return;
+  }
+  renderFormularyState();
+  renderLevelPicker();          // 禁用狀態要跟著解除
+  renderRecords();              // 通用版才有最佳紀錄可看
 });
 
 // 清除紀錄：二次確認走頁內元素而不是 window.confirm——
