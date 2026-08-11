@@ -1025,6 +1025,120 @@ describe('主持人自查 S-1／S-2（批次 4 覆審期間發現）', () => {
     assert.ok(!txt.includes('院內清單'));
   });
 
+  test('S-3 起始頁的題庫規模：院內版不得宣稱全庫是出題母體', async () => {
+    // C51 第 4 張抓到的：「命中 30 品項」正下方就是「題庫 3,941 題」，兩個數字面對面
+    needPool();
+    const ids = pickIds(30, 5301);
+    const dom = await boot({ saved: savedJson(payloadOf(ids)) });
+    const html = dom.$('poolInfo').innerHTML;
+    assert.ok(html.includes('院內清單'), `院內版要標明出題範圍：${html}`);
+    assert.ok(html.includes('30'), '要印出實際的 N');
+    assert.ok(!/<b>題庫<\/b>/.test(html), '院內版不得把全庫講成「題庫 N 題」');
+    // 全庫規模仍可顯示，但必須標成比對母體
+    assert.ok(html.includes('自全題庫'), `全庫規模要標成比對母體：${html}`);
+  });
+
+  test('S-3 通用版的題庫規模照舊（不得兩種模式都改掉）', async () => {
+    needPool();
+    const dom = await boot();
+    const html = dom.$('poolInfo').innerHTML;
+    assert.ok(/<b>題庫<\/b>/.test(html), html);
+    assert.ok(html.includes(POOL.meta.count.toLocaleString()));
+    assert.ok(!html.includes('院內清單'));
+  });
+
+  test('S-4 禁用級別的原因那行不得被 opacity 淡化', () => {
+    // 靜態 CSS 契約：那行是使用者最需要讀的一句，不能與裝飾文字同等待遇。
+    // 註解先剝掉——說明文字裡的 `opacity` 會讓這條恆紅（repo 既有紀律）
+    const css = HTML.replace(/<!--[\s\S]*?-->/g, '');
+    /** 整張卡（selector 結尾就是 `[aria-disabled="true"]`）的規則裡有沒有 opacity */
+    const dimsWholeCard = (src) =>
+      /\.level\[aria-disabled="true"\]\s*\{[^}]*opacity/.test(src);
+
+    assert.equal(dimsWholeCard(css), false, 'opacity 仍套在整張卡上，原因那行會跟著淡掉');
+    // 淡化本身要還在，否則「禁用看起來和可用一樣」變成另一個問題
+    assert.ok(/\.level\[aria-disabled="true"\]\s+\.lv-name[^}]*opacity/.test(css.replace(/\s+/g, ' '))
+      || /\.lv-meta\s*\{\s*opacity/.test(css.replace(/\s+/g, ' ')),
+      '子元素仍應被淡化，否則禁用狀態在視覺上消失');
+    // 反向 sentinel：偵測式要真的抓得到違規寫法
+    assert.equal(dimsWholeCard('.level[aria-disabled="true"] { opacity: 0.55; }'), true);
+    assert.equal(dimsWholeCard('.level[aria-disabled="true"] .lv-name { opacity: 0.55; }'), false);
+  });
+
+  test('S-5 未命中明細要有代碼對照，且措辭與分類表同源', async () => {
+    needPool();
+    const dom = await boot();
+    dom.$('btnFormulary').click();
+    await dom.settle();
+    dom.$('fxInput').value = [POOL.items[0].id, EXCLUDED.items[0].id, '衛署藥XX字第000001號'].join('\n');
+    dom.$('btnFxAnalyze').click();
+
+    const legend = dom.$('fxListLegend').textContent;
+    assert.equal(dom.hidden('fxListLegend'), false, '畫面上要看得到對照');
+    for (const code of [Category.NON_SOLID_ORAL, Category.LOW_QUALITY, Category.UNLISTED]) {
+      assert.ok(legend.includes(code), `對照缺少代碼 ${code}`);
+      // 措辭必須來自 CATEGORY_LABEL，不得在 UI 另寫一份
+      assert.ok(legend.includes(CATEGORY_LABEL[code].split('（')[0]),
+        `${code} 的說明與 CATEGORY_LABEL 不同源`);
+    }
+  });
+
+  test('切回全題庫：只移除那一個 key，且真的回到通用版', async () => {
+    needPool();
+    const ids = pickIds(30, 5401);          // 這份清單的 L2 是禁用的，切回後要解除
+    const payload = payloadOf(ids);
+    const recSentinel = JSON.stringify({ schema: 1, sentinel: true });
+    const dom = await boot({ saved: savedJson(payload), records: recSentinel });
+    assert.equal(dom.hidden('startFxNote'), false);
+    assert.equal(cardFor(dom, Level.L2).disabled, true);
+
+    // 取消路徑：零 mutation
+    dom.$('btnFxExit').click();
+    assert.equal(dom.hidden('fxExitConfirm'), false, '要有二次確認');
+    const before = storeControl.mutations().length;
+    dom.$('btnFxExitNo').click();
+    assert.equal(dom.hidden('fxExitConfirm'), true);
+    assert.equal(storeControl.mutations().length, before, '取消不得有任何 mutation');
+    assert.equal(dom.hidden('startFxNote'), false, '取消後仍是院內版');
+
+    // 確定路徑
+    dom.$('btnFxExit').click();
+    dom.$('btnFxExitYes').click();
+    const muts = storeControl.mutations();
+    assert.deepEqual(muts.map((m) => `${m.op}:${m.key}`), [`removeItem:${FX_KEY}`],
+      '只能 removeItem 那一個精確 key——不得 clear()、不得前綴掃描');
+    assert.equal(storeControl.map.get(REC_KEY), recSentinel, 'records 不得被波及');
+    assert.equal(dom.hidden('startFxNote'), true, '應已回到通用版');
+    assert.equal(dom.hidden('fxExitConfirm'), true);
+    assert.ok(dom.$('poolInfo').innerHTML.includes('題庫'), '題庫規模要換回全庫寫法');
+    assert.equal(cardFor(dom, Level.L2).disabled, false, '禁用狀態要解除');
+
+    // 真的用全庫出題（不是只有畫面變）
+    Math.random = makeRng(5402);
+    cardFor(dom, Level.L1).click();
+    dom.$('btnStart').click();
+    Math.random = REAL_RANDOM;
+    const subsetAns = new Set(POOL.items.filter((it) => ids.includes(it.id)).map((it) => it.ans));
+    assert.equal(Number(dom.$('qTotal').textContent), QUIZ_SIZE, '切回後應是完整 20 題');
+    assert.ok(optionNames(dom).some((n) => !subsetAns.has(n)),
+      '選項仍全部落在原本那 30 個院內品項內——索引沒有換回全庫');
+  });
+
+  test('切回失敗時不得宣稱已切回（storage 移不掉）', async () => {
+    needPool();
+    const ids = pickIds(30, 5403);
+    const dom = await boot({
+      saved: savedJson(payloadOf(ids)),
+      store: { throwOnRemove: new Error('denied') },
+    });
+    dom.$('btnFxExit').click();
+    dom.$('btnFxExitYes').click();
+    // 〔堵〕記憶體切了但 storage 還在 → 重整又是院內版，而畫面已說「已切回」
+    assert.equal(dom.hidden('startFxNote'), false, '移不掉就必須仍在院內版');
+    assert.ok(storeControl.map.has(FX_KEY), '清單其實還在');
+    assert.equal(dom.hidden('startFxWarn'), false, '要說明移除失敗');
+  });
+
   test('S-2 院內版重抽失敗只退回起始頁，不得把整個 app 打死', async () => {
     /**
      * 實測：30 品項的清單 probe 判定 L1 可用（K=29），但重抽 200 次失敗 105 次。
@@ -1443,6 +1557,7 @@ describe('DOM 掛點確實存在於 index.html（樁會自動生元素，這條�
     'startFxNote', 'sFxN', 'sFxUnlisted', 'startFxWarn',
     'qFxNote', 'qFxN', 'qFxK', 'qFxUnlisted',
     'resultFxNote', 'rFxN', 'rFxK', 'rFxUnlisted',
+    'btnFxExit', 'fxExitConfirm', 'btnFxExitYes', 'btnFxExitNo', 'fxListLegend',
   ];
   for (const id of IDS) {
     test(`#${id} 在 index.html 內`, () => {

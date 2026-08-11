@@ -193,17 +193,13 @@ async function loadPool() {
   }
 
   state.pool = data;
+  state.keyCount = 0;
   state.noFuzzy = new Set(data.meta.no_fuzzy || []);
   state.items = data.items;
   state.index = buildIndex(data.items);
 
-  const m = data.meta;
-  $('poolInfo').innerHTML =
-    `<b>題庫</b> <span class="num">${m.count.toLocaleString()}</span> 題`
-    + `（相異品名 <span class="num">${keys.size.toLocaleString()}</span>）`
-    + ` ｜ <b>來源</b> ${m.source}`
-    + (m.source_file ? ` ｜ <b>檔案</b> <span class="num">${m.source_file}</span>` : '');
-  if (m.source_version) $('srcVer').textContent = `，資料版本 ${m.source_version}`;
+  state.keyCount = keys.size;
+  if (data.meta.source_version) $('srcVer').textContent = `，資料版本 ${data.meta.source_version}`;
 
   // 院內清單必須在畫級別選擇器**之前**決定，否則會先畫出一輪全部可選的按鈕，
   // 使用者可能在那個空檔按下一個其實不可用的級別（D46 的同型問題）
@@ -581,6 +577,32 @@ function bootFormulary() {
   renderFormularyState(bootError);
 }
 
+/**
+ * 退出院內版，切回全題庫。
+ *
+ * **規格沒有定義過這條路**（D40–D47 只講怎麼進來，沒講怎麼出去）——
+ * 那是規格缺口，不是刻意設計：`fx` 一旦載入就寫進 localStorage，
+ * 之後每次開站都會還原，使用者除了開 DevTools 刪 key 之外沒有出口。
+ *
+ * 移除只 `removeItem` **那一個精確 key**：不 `clear()`、不前綴掃描（既有紀律）。
+ * **移除失敗時不得宣稱成功**——清單其實還在，下次開啟又會冒出來（沿用 `clearRecords()`）。
+ *
+ * @returns {boolean} 是否真的移除了
+ */
+function exitFormulary() {
+  const ls = storage();
+  if (!ls) return false;
+  try { ls.removeItem(FORMULARY_KEY); } catch { return false; }
+
+  state.fxOp++;                       // D46：讓任何進行中的載入作廢
+  state.fx = null;
+  state.items = state.pool.items;
+  state.index = buildIndex(state.pool.items);
+  state.eligible = new Map();         // 索引換回全庫，可用鍵快取全部作廢
+  state.lookAlike = null;
+  return true;
+}
+
 /** 三級全部禁用（D41：此時要提示重新產生連結） */
 const fxAllDisabled = () => !!state.fx && LEVEL_ORDER.every((lv) => !state.fx.levels[lv].available);
 
@@ -594,10 +616,32 @@ function fxUnlistedSentence() {
   return `｜另有 ${m} 筆院內品項${CATEGORY_LABEL[Category.UNLISTED]}`;
 }
 
+/**
+ * 起始頁的題庫規模說明。
+ *
+ * **院內版不得宣稱「題庫 3,941 題」**（C51 人工留檔 S-3）：那一卷只從命中的 N 個
+ * 院內品項出，而這行字就印在「命中 N 品項」正下方——兩個矛盾的數字面對面。
+ * 這與成績卡的 S-1 是同一個判準：使用者拿數字做判斷，數字就不能是別人的。
+ * 全庫規模仍然顯示，但**明確標成「比對母體」**而不是出題母體。
+ */
+function renderPoolInfo() {
+  const m = state.pool?.meta;
+  if (!m) return;
+  const src = ` ｜ <b>來源</b> ${m.source}`
+    + (m.source_file ? ` ｜ <b>檔案</b> <span class="num">${m.source_file}</span>` : '');
+  $('poolInfo').innerHTML = state.fx
+    ? `<b>出題範圍</b> 院內清單 <span class="num">${state.fx.N.toLocaleString()}</span> 品項`
+      + `（自全題庫 <span class="num">${m.count.toLocaleString()}</span> 題中命中）${src}`
+    : `<b>題庫</b> <span class="num">${m.count.toLocaleString()}</span> 題`
+      + `（相異品名 <span class="num">${(state.keyCount ?? 0).toLocaleString()}</span>）${src}`;
+}
+
 /** 起始頁的院內版狀態。通用版時整塊隱藏（但啟動錯誤仍要說出來） */
 function renderFormularyState(bootError = '') {
   const on = !!state.fx;
+  renderPoolInfo();
   show($('startFxNote'), on);
+  if (!on) show($('fxExitConfirm'), false);       // 切回之後確認框不該留在畫面上
 
   const warn = bootError ? [bootError] : [];
   if (on) {
@@ -808,6 +852,15 @@ function renderFxBreakdown(cls) {
     ...FX_CATS.map((c) => ({ label: CATEGORY_LABEL[c.code], n: cls[c.key].length })),
   ].map((r) => `<div class="fx-row"><span class="k">${escapeHtml(r.label)}</span>`
     + `<span class="v">${r.n}</span></div>`).join('');
+
+  /**
+   * 明細印的是**內部代碼**，畫面上必須有對照（C51 人工留檔 S-5）。
+   * 原本只有下載檔的檔頭有對照表，畫面上的 `NON_SOLID_ORAL` 要使用者自己猜。
+   * 措辭從 `CATEGORY_LABEL` 導出（取括號前的短名），不在這裡另寫一份。
+   */
+  $('fxListLegend').textContent = '代碼對照：'
+    + FX_CATS.map((c) => `${c.code}＝${CATEGORY_LABEL[c.code].split('（')[0]}`).join(' ｜ ');
+  show($('fxListLegend'));
 
   // 未命中明細**只經 textContent**（D43）：這裡的字串來自使用者貼上的原始輸入，
   // 未知前綴的 token 會原樣保留（C50 的惡意字串正是走這條路徑）
@@ -2238,6 +2291,24 @@ $('btnFxCopy').addEventListener('click', () => {
     $('fxCopied').textContent = '複製失敗，請手動選取';
     show($('fxCopied'));
   }
+});
+
+// 切回全題庫。二次確認同「清除紀錄」的作法
+$('btnFxExit').addEventListener('click', () => show($('fxExitConfirm')));
+$('btnFxExitNo').addEventListener('click', () => show($('fxExitConfirm'), false));
+$('btnFxExitYes').addEventListener('click', () => {
+  const ok = exitFormulary();
+  if (!ok) {
+    // 移除失敗時**不得切回**：記憶體切了但 storage 還在，重整又是院內版，
+    // 而畫面已經說「已切回」——那比不給出口更糟
+    $('startFxWarn').textContent = '無法從這個瀏覽器移除院內清單（儲存空間不可用），仍在院內版。';
+    show($('startFxWarn'));
+    show($('fxExitConfirm'), false);
+    return;
+  }
+  renderFormularyState();
+  renderLevelPicker();          // 禁用狀態要跟著解除
+  renderRecords();              // 通用版才有最佳紀錄可看
 });
 
 // 清除紀錄：二次確認走頁內元素而不是 window.confirm——
