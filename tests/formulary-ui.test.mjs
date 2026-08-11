@@ -1036,6 +1036,10 @@ describe('主持人自查 S-1／S-2（批次 4 覆審期間發現）', () => {
     assert.ok(!/<b>題庫<\/b>/.test(html), '院內版不得把全庫講成「題庫 N 題」');
     // 全庫規模仍可顯示，但必須標成比對母體
     assert.ok(html.includes('自全題庫'), `全庫規模要標成比對母體：${html}`);
+    // V5.1：`#poolInfo` 收進 details 之後，收合狀態下唯一看得到的是這行摘要值。
+    // 〔堵〕摘要值沒跟著換模式 → 院內版的入口寫著「全題庫 3,941 題」，
+    //       而 S-3 抓的就是這句話出現在院內版
+    assert.equal(dom.$('poolSummary').textContent, '院內清單');
   });
 
   test('S-3 通用版的題庫規模照舊（不得兩種模式都改掉）', async () => {
@@ -1045,6 +1049,7 @@ describe('主持人自查 S-1／S-2（批次 4 覆審期間發現）', () => {
     assert.ok(/<b>題庫<\/b>/.test(html), html);
     assert.ok(html.includes(POOL.meta.count.toLocaleString()));
     assert.ok(!html.includes('院內清單'));
+    assert.equal(dom.$('poolSummary').textContent, `全題庫 ${POOL.meta.count.toLocaleString()} 題`);
   });
 
   test('S-4 禁用級別的原因那行不得被 opacity 淡化', () => {
@@ -1090,6 +1095,9 @@ describe('主持人自查 S-1／S-2（批次 4 覆審期間發現）', () => {
     const recSentinel = JSON.stringify({ schema: 1, sentinel: true });
     const dom = await boot({ saved: savedJson(payload), records: recSentinel });
     assert.equal(dom.hidden('startFxNote'), false);
+    // V5.1：出口移進收合區後就不再是 `#startFxNote` 的子節點，得自己切顯示。
+    // 〔堵〕忘了切 → 通用版也會出現「切回全題庫」，按下去是無事發生的破壞性操作
+    assert.equal(dom.hidden('fxExitRow'), false, '院內版要有出口');
     assert.equal(cardFor(dom, Level.L2).disabled, true);
 
     // 取消路徑：零 mutation
@@ -1109,6 +1117,7 @@ describe('主持人自查 S-1／S-2（批次 4 覆審期間發現）', () => {
       '只能 removeItem 那一個精確 key——不得 clear()、不得前綴掃描');
     assert.equal(storeControl.map.get(REC_KEY), recSentinel, 'records 不得被波及');
     assert.equal(dom.hidden('startFxNote'), true, '應已回到通用版');
+    assert.equal(dom.hidden('fxExitRow'), true, '通用版不得留著「切回全題庫」');
     assert.equal(dom.hidden('fxExitConfirm'), true);
     assert.ok(dom.$('poolInfo').innerHTML.includes('題庫'), '題庫規模要換回全庫寫法');
     assert.equal(cardFor(dom, Level.L2).disabled, false, '禁用狀態要解除');

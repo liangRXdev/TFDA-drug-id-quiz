@@ -186,6 +186,9 @@ describe('C18 最佳紀錄的兩個交叉方向、相等、讀回顯示', () => 
     // 〔堵〕持久化正確但 UI 完全沒顯示
     $('btnAgain').click();
     assert.ok(!hidden('recordsBox'), '有紀錄卻沒顯示紀錄區塊');
+    // V5.1：內容與收合容器同進退。〔堵〕只切內容 → 起始頁留下一個展不出東西的空入口
+    assert.ok(!hidden('discRecords'), '有紀錄卻沒顯示收合入口');
+    assert.match($('recordsSummary').textContent, /簡單/, '收合狀態下看不到摘要值');
     const html = $('recordsBody').innerHTML;
     const rec = stored().L1;
     assert.match(html, /簡單級/);
@@ -461,6 +464,9 @@ describe('C21 清除紀錄：精確 key 與取消路徑', () => {
       assert.ok(store.map.has(k), `同源的其他 key 被誤刪：${k}`);
     }
     assert.ok(hidden('recordsBox'), '清除後仍顯示紀錄區塊');
+    assert.ok(hidden('discRecords'), '清除後仍顯示收合入口');
+    // 〔堵〕把 `#recordsNote` 一起收進 details → 清除後整區消失，
+    //       使用者按了「確定清除」卻看不到任何回應
     assert.match($('recordsNote').textContent, /已清除/);
   });
 
