@@ -366,6 +366,12 @@ function renderRecords() {
   state.records = recs;
   const levels = recs ? LEVEL_ORDER.filter((lv) => recs[lv]) : [];
   show($('recordsBox'), levels.length > 0);
+  // 收合容器與內容同進退。**`#recordsNote` 刻意留在容器外**——
+  // 清除成功後 `recordsBox` 會消失，提示若跟著被收走，
+  // 按下「確定清除」就變成畫面全部不見、沒有任何回應
+  show($('discRecords'), levels.length > 0);
+  $('recordsSummary').textContent = levels
+    .map((lv) => `${LEVELS[lv].name} ${recs[lv].bestScore.value.toFixed(1)}`).join(' · ');
   show($('clearConfirm'), false);
   show($('recordsNote'), false);
   $('recordsBody').innerHTML = levels.map((lv) => {
@@ -629,6 +635,11 @@ function renderPoolInfo() {
   if (!m) return;
   const src = ` ｜ <b>來源</b> ${m.source}`
     + (m.source_file ? ` ｜ <b>檔案</b> <span class="num">${m.source_file}</span>` : '');
+  // 收合狀態下的一行答案：「我現在用哪個題庫」不該要展開才看得到。
+  // 院內版**不在這裡重印 N**——正上方的 `#startFxNote` 已經印了，
+  // 同一個數字出現兩次會讓人開始比對兩者是不是同一件事
+  $('poolSummary').textContent = state.fx
+    ? '院內清單' : `全題庫 ${m.count.toLocaleString()} 題`;
   $('poolInfo').innerHTML = state.fx
     ? `<b>出題範圍</b> 院內清單 <span class="num">${state.fx.N.toLocaleString()}</span> 品項`
       + `（自全題庫 <span class="num">${m.count.toLocaleString()}</span> 題中命中）${src}`
@@ -641,6 +652,9 @@ function renderFormularyState(bootError = '') {
   const on = !!state.fx;
   renderPoolInfo();
   show($('startFxNote'), on);
+  // 出口與狀態同進同出。**它在收合區內，因此必須自己切**——
+  // 以前它是 `#startFxNote` 的子節點，藏 note 就順便藏了按鈕
+  show($('fxExitRow'), on);
   if (!on) show($('fxExitConfirm'), false);       // 切回之後確認框不該留在畫面上
 
   const warn = bootError ? [bootError] : [];

@@ -104,10 +104,13 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .metric .interp.warn { color: var(--danger); }
 
 /* 難度選擇 */
-.levels { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 0.6rem; margin: 0.9rem 0 0.2rem; }
+/* 難度卡就是起始頁的主要 CTA——「開始測驗」在選定之前沒有意義，
+   把它擺在難度之上只會讓第一次使用者先看到一顆按不動的按鈕。
+   因此三張卡吃版面上的主要重量，其餘一律降級。 */
+.levels { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 0.7rem; margin: 1rem 0 0.2rem; }
 .level {
-  display: flex; flex-direction: column; gap: 0.15rem; text-align: left;
-  padding: 0.7rem 0.8rem; background: #fff; color: var(--text-primary);
+  display: flex; flex-direction: column; gap: 0.2rem; text-align: left;
+  padding: 0.9rem 0.9rem; background: #fff; color: var(--text-primary);
   border: 1px solid var(--border); border-radius: 6px; font-weight: 400;
 }
 .level:hover:not(:disabled) { background: var(--accent-light); border-color: var(--accent); }
@@ -208,6 +211,31 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .rec-confirm { margin-top: 0.5rem; font-size: 0.75rem; color: var(--warning); }
 .rec-note { font-size: 0.72rem; color: var(--text-muted); margin: 0.5rem 0 0; }
 .rec-flash { font-size: 0.78rem; color: var(--accent); font-weight: 500; margin: 0.6rem 0 0; }
+
+/* ── 起始頁收合區（V5.1）────────────────────────────────────────────
+   原生 <details>，**不加任何展開動畫**：箭頭旋轉是 transition，
+   會落在 D27「動效只准出現在 reduced-motion block 內」的正向表列上，
+   為一個裝飾去擴充那份清單不划算。marker 用瀏覽器原生的。
+
+   summary 是 learner flow 以外的入口，**不得與主要 CTA 同視覺重量**：
+   字級小於按鈕、不給邊框、不給背景。但觸控目標仍守 44px——
+   降權的是視覺，不是可及性。 */
+.disc { border-top: 1px solid var(--border); }
+.disc:last-of-type { border-bottom: 1px solid var(--border); }
+#start > details.disc:first-of-type { margin-top: 1.4rem; }
+.disc > summary {
+  min-height: 44px; padding: 0.7rem 0.2rem;
+  font-size: 0.85rem; font-weight: 500; color: var(--accent); cursor: pointer;
+}
+.disc > summary::marker { color: var(--text-muted); }
+.disc > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.disc > summary:hover { color: var(--accent-hover); }
+/* 收合狀態下的摘要值：看得到重點就不必展開（例：「簡單 95.0 · 中級 85.0」） */
+.disc-val { font-weight: 400; font-size: 0.76rem; color: var(--text-muted); }
+.disc-val:not(:empty)::before { content: '　'; }
+.disc-body { padding: 0 0.2rem 0.9rem; }
+.disc-body .records { margin-top: 0; border: none; padding: 0; }
+.fx-exit { margin-top: 0.8rem; }
 
 /* 院內清單（規格 V5）。
    刻意用 muted：涵蓋範圍是限制說明，不是成就標章——
@@ -373,7 +401,7 @@ input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow:
 
   <header>
     <h1>藥品辨識王</h1>
-    <p class="sub">藥師外觀辨識自我測驗 — 依實拍圖與外觀特徵辨識英文品名</p>
+    <p class="sub">藥師外觀辨識自我訓練</p>
   </header>
 
   <!-- 載入失敗（規格 C4） -->
@@ -382,58 +410,86 @@ input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow:
     <p class="hint" id="fatalMsg"></p>
   </section>
 
-  <!-- 開始 -->
+  <!-- 開始。
+       資訊層級（V5.1 起始頁重排）：主要決策在上、常駐揭露在中、其餘收進 <details>。
+       **哪些不得收進 <details>**：院內版狀態（D34.1 全額揭露）、降級告知、
+       級別禁用原因。這三類是使用者做判斷要用的，收起來等於降級成裝飾——
+       契約由 tests/engagement.test.mjs 的「常駐訊息不得位於 <details> 內」守著。 -->
   <section id="start" class="card hidden">
     <h2><span class="step-num">1</span>選擇難度</h2>
-    <p class="hint">每回合隨機 <span id="introN">20</span> 題，答案鍵不重複。作答後即鎖定，無法重試。</p>
+    <p class="hint">每回合隨機 <span id="introN">20</span> 題，作答後即鎖定，無法重試。</p>
 
     <div class="levels" id="levelPick" role="radiogroup" aria-label="難度"></div>
     <p class="level-warn hidden" id="levelWarn"></p>
 
-    <!-- 最佳紀錄（規格 v4 D25／D32）。一筆都沒有時整塊隱藏 -->
-    <div class="records hidden" id="recordsBox">
-      <div class="rec-head">
-        <span>最佳紀錄（本機瀏覽器，不上傳）</span>
-        <button class="link" id="btnClearRecords">清除紀錄</button>
-      </div>
-      <div id="recordsBody"></div>
-      <div class="rec-confirm hidden" id="clearConfirm">
-        清除後無法復原，確定嗎？
-        <div class="btn-row" style="margin-top:0.4rem">
-          <button id="btnClearYes">確定清除</button>
-          <button id="btnClearNo" class="ghost">取消</button>
-        </div>
-      </div>
-    </div>
-    <p class="rec-note hidden" id="recordsNote"></p>
-
-    <!-- 院內版狀態（規格 V5 D34.1／C43）。通用版時整塊隱藏。
-         N（命中品項）與 K（該級可出題藥名）是兩個數字，K 印在各級別卡上 -->
-    <p class="fx-note hidden" id="startFxNote">院內版 ｜ 命中 <span class="n" id="sFxN">0</span>
-      品項<span id="sFxUnlisted"></span>｜院內版只顯示當回合分數，不計入最佳紀錄
-      <button class="link" id="btnFxExit">切回全題庫</button></p>
-    <!-- 二次確認走頁內元素而不是 window.confirm——理由同「清除紀錄」：
-         瀏覽器 modal 會阻斷整個頁面，而且取消路徑無從自動驗證 -->
-    <div class="rec-confirm hidden" id="fxExitConfirm">
-      切回全題庫後，這份院內清單會從本瀏覽器移除。要再用得重新開一次連結。
-      <div class="btn-row" style="margin-top:0.4rem">
-        <button id="btnFxExitYes">確定切回</button>
-        <button id="btnFxExitNo" class="ghost">取消</button>
-      </div>
-    </div>
-    <p class="fx-warn hidden" id="startFxWarn"></p>
-
-    <div class="test-info" id="poolInfo" style="margin-top:0.9rem"></div>
     <div class="btn-row">
       <button id="btnStart" disabled>請先選擇難度</button>
       <button id="btnFlash" class="ghost">快速閃卡（不計分）</button>
     </div>
-    <p class="hint" style="margin:0.7rem 0 0">
-      閃卡模式不需選難度：只看圖，翻開後顯示藥名，不作答、不計分。適合測驗前先熟悉外觀。
-    </p>
-    <div class="btn-row">
-      <button id="btnFormulary" class="ghost">教學藥師：產生院內清單連結</button>
-    </div>
+    <p class="hint" style="margin:0.6rem 0 0">閃卡不需選難度：只看圖，翻開後顯示藥名，不計分。</p>
+
+    <!-- 院內版狀態（規格 V5 D34.1／C43）。通用版時整塊隱藏。**常駐，不進 details。**
+         N（命中品項）與 K（該級可出題藥名）是兩個數字，K 印在各級別卡上 -->
+    <p class="fx-note hidden" id="startFxNote">院內版 ｜ 命中 <span class="n" id="sFxN">0</span>
+      品項<span id="sFxUnlisted"></span>｜院內版只顯示當回合分數，不計入最佳紀錄</p>
+    <p class="fx-warn hidden" id="startFxWarn"></p>
+    <p class="rec-note hidden" id="recordsNote"></p>
+
+    <!-- ── 收合區（progressive disclosure）──────────────────────────
+         用原生 <details>：零 JS、鍵盤與輔助技術免費，且不新增任何動效
+         （箭頭旋轉是 transition，會動到 D27 的動效正向表列，不值得） -->
+
+    <details class="disc hidden" id="discRecords">
+      <summary>我的最佳紀錄<span class="disc-val" id="recordsSummary"></span></summary>
+      <div class="disc-body">
+        <!-- 最佳紀錄（規格 v4 D25／D32）。一筆都沒有時整塊隱藏 -->
+        <div class="records hidden" id="recordsBox">
+          <div class="rec-head">
+            <span>本機瀏覽器，不上傳</span>
+            <button class="link" id="btnClearRecords">清除紀錄</button>
+          </div>
+          <div id="recordsBody"></div>
+          <div class="rec-confirm hidden" id="clearConfirm">
+            清除後無法復原，確定嗎？
+            <div class="btn-row" style="margin-top:0.4rem">
+              <button id="btnClearYes">確定清除</button>
+              <button id="btnClearNo" class="ghost">取消</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details class="disc">
+      <summary>題庫與資料來源<span class="disc-val" id="poolSummary"></span></summary>
+      <div class="disc-body">
+        <div class="test-info" id="poolInfo"></div>
+        <!-- 切回全題庫（D40.1）。**刻意放在收合區**：破壞性操作不該在主要視線上。
+             失敗訊息寫到 #startFxWarn（在收合區外），確保「沒切成功」看得到 -->
+        <div class="fx-exit hidden" id="fxExitRow">
+          <button class="link" id="btnFxExit">切回全題庫</button>
+          <!-- 二次確認走頁內元素而不是 window.confirm——理由同「清除紀錄」：
+               瀏覽器 modal 會阻斷整個頁面，而且取消路徑無從自動驗證 -->
+          <div class="rec-confirm hidden" id="fxExitConfirm">
+            切回全題庫後，這份院內清單會從本瀏覽器移除。要再用得重新開一次連結。
+            <div class="btn-row" style="margin-top:0.4rem">
+              <button id="btnFxExitYes">確定切回</button>
+              <button id="btnFxExitNo" class="ghost">取消</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details class="disc">
+      <summary>教學藥師工具</summary>
+      <div class="disc-body">
+        <p class="hint" style="margin:0 0 0.6rem">
+          把院內品項清單編成一條連結，發給新人後只從院內有的藥出題。清單不上傳。
+        </p>
+        <button id="btnFormulary" class="ghost">產生院內清單連結</button>
+      </div>
+    </details>
   </section>
 
   <!-- 產生院內清單連結（教學藥師端，規格 V5 §5.2） -->

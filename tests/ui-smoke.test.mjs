@@ -501,3 +501,115 @@ describe('C16 L2 完整回合', () => {
     assert.match(drawn.join(' '), /中級/, '成績卡未印出級別');
   });
 });
+
+// ══ V5.1 起始頁資訊層級（靜態原始碼契約）═══════════════════════════════
+//
+// 這輪重排把「最佳紀錄／題庫與資料來源／教學藥師工具」收進 <details>。
+// 收合本身沒有風險，**收錯東西才有**：把院內版狀態或降級告知一起收進去，
+// 畫面會變得更乾淨、測試會全綠、而使用者從此看不到那些訊息——
+// 這正是 D34.1 註解裡說的「被當成裝飾略過」，只是程度更徹底。
+//
+// 這裡不驗 margin、不驗第幾個 child、不驗渲染尺寸（樁上沒有 cascade，
+// 那些一律是假綠燈，見 F13）。只釘兩件重排會弄壞、而且釘得住的事：
+// 哪些東西不准進收合區，以及 summary 的觸控目標。
+
+describe('V5.1 起始頁：收合區的邊界', () => {
+  /**
+   * 註解與 `<style>` 都必須先剝掉。
+   * HTML 註解與 CSS 註解裡都寫著 `<details>`（重排的理由就記在那），
+   * 不剝的話巢狀深度從註解開始算，整組契約算出來的範圍全錯——
+   * 實際踩到的是 CSS 註解那一個：只剝 HTML 註解時深度收不回 0。
+   */
+  const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<style>[\s\S]*?<\/style>/g, '');
+
+  /** 取出所有 `<details>…</details>` 的字元範圍（數巢狀，雖然目前沒有巢狀） */
+  function detailsRanges(src) {
+    const out = [];
+    const re = /<details\b|<\/details\s*>/gi;
+    let depth = 0;
+    let start = 0;
+    let m;
+    while ((m = re.exec(src))) {
+      if (m[0][1] === '/') {
+        if (depth > 0 && --depth === 0) out.push([start, re.lastIndex]);
+      } else if (depth++ === 0) {
+        start = m.index;
+      }
+    }
+    assert.equal(depth, 0, 'index.html 的 <details> 沒有成對關閉');
+    return out;
+  }
+
+  const RANGES = detailsRanges(html);
+
+  function inDetails(needle) {
+    const at = html.indexOf(needle);
+    assert.ok(at >= 0, `index.html 找不到 ${needle}`);
+    return RANGES.some(([a, b]) => at > a && at < b);
+  }
+
+  test('前置條件：起始頁確實有收合區（否則以下每一條都會空轉全綠）', () => {
+    assert.ok(RANGES.length >= 3, `預期至少三組 <details>，實際 ${RANGES.length}`);
+  });
+
+  /**
+   * **常駐白名單**。每一條都是使用者「要不要開始這一卷、這一卷涵蓋什麼」
+   * 當下需要的資訊，不是可以稍後再查的中繼資料。
+   */
+  const ALWAYS_VISIBLE = [
+    ['startFxNote', '院內版狀態（D34.1 全額揭露：命中 N 品項、另有 M 筆不在資料集中）'],
+    ['sFxUnlisted', '「另有 M 筆院內品項不在外觀資料集中」這一句'],
+    ['startFxWarn', '降級告知（品項消失、三級全禁用、切回失敗）'],
+    ['levelPick', '難度卡本身，禁用原因 .lv-off 就渲染在裡面'],
+    ['levelWarn', '選到禁用級別時的說明'],
+    ['recordsNote', '清除紀錄的成敗回饋（清除成功後 recordsBox 會消失，只剩這句）'],
+  ];
+  for (const [id, why] of ALWAYS_VISIBLE) {
+    test(`#${id} 不得收進 <details>：${why}`, () => {
+      assert.equal(inDetails(`id="${id}"`), false,
+        `#${id} 被收進收合區了。它不是中繼資料，收起來等於降級成裝飾`);
+    });
+  }
+
+  /**
+   * 反向哨兵：白名單若因為 `id=` 寫法改變而全部掃不到，上面每一條都會
+   * 「找不到 → assert.ok 失敗」而不是靜默全綠——這條再確認掃描本身有效，
+   * 也順帶釘住「破壞性操作不在主要視線上」這個重排目標。
+   */
+  test('破壞性操作確實在收合區內（確認掃描不是恆假）', () => {
+    assert.equal(inDetails('id="btnClearRecords"'), true, '清除紀錄應收在最佳紀錄區內');
+    assert.equal(inDetails('id="btnFxExit"'), true, '切回全題庫應收在題庫與資料來源區內');
+  });
+});
+
+describe('V5.1 收合區入口的觸控目標與視覺重量（靜態 CSS 契約）', () => {
+  const css = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+
+  test('summary 有 44px 觸控目標（與 button／#qInput 同一標準）', () => {
+    // 〔堵〕降權時順手把 summary 做成一行小字。視覺可以降權，**可及性不行**
+    const m = /\.disc\s*>\s*summary\s*\{([^}]*)\}/.exec(css);
+    assert.ok(m, '缺少 .disc > summary 的樣式宣告');
+    const mh = /min-height:\s*(\d+)px/.exec(m[1]);
+    assert.ok(mh, '.disc > summary 未宣告 min-height');
+    assert.ok(Number(mh[1]) >= 44, `.disc > summary 的 min-height 只有 ${mh[1]}px`);
+  });
+
+  test('summary 字級小於主要按鈕（不得與 CTA 同視覺重量）', () => {
+    const sum = /\.disc\s*>\s*summary\s*\{([^}]*)\}/.exec(css)[1];
+    const btn = /(?:^|\})\s*button\s*\{([^}]*)\}/.exec(css)[1];
+    const size = (body) => Number(/font-size:\s*([\d.]+)rem/.exec(body)?.[1]);
+    assert.ok(size(sum) < size(btn),
+      `summary ${size(sum)}rem 不小於 button ${size(btn)}rem——收合區入口不該與 CTA 等重`);
+  });
+
+  test('.link 仍刻意小於 44px（44px 契約不得外溢到破壞性操作）', () => {
+    // 「清除紀錄」與「切回全題庫」刻意難按：誤觸成本由二次確認吸收，
+    // 不是由更大的按鈕吸收。summary 加 44px 時很容易順手把整組小連結一起放大
+    const m = /(?:^|\})\s*\.link\s*\{([^}]*)\}/.exec(css);
+    assert.ok(m, '缺少 .link 樣式');
+    assert.match(m[1], /min-height:\s*0/, '.link 的 min-height 被改掉了');
+  });
+});
