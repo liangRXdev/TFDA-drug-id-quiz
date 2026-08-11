@@ -234,6 +234,7 @@ textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3
 .fx-row { display: flex; flex-wrap: wrap; gap: 0.5rem; font-size: 0.74rem; color: var(--text-muted); padding: 0.2rem 0; }
 .fx-row .k { flex: 1 1 60%; }
 .fx-row .v { font-family: var(--mono); color: var(--text-primary); font-weight: 700; }
+.fx-legend { font-size: 0.7rem; color: var(--text-muted); margin: 0.6rem 0 0; line-height: 1.6; }
 .fx-list {
   margin-top: 0.6rem; max-height: 12rem; overflow: auto; white-space: pre-wrap; word-break: break-all;
   font-family: var(--mono); font-size: 0.72rem; color: var(--text-muted);
@@ -248,8 +249,15 @@ textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3
 .fx-link input[type=text] { width: 100%; box-sizing: border-box; text-transform: none; font-size: 0.8rem; }
 .fx-copied { font-size: 0.75rem; color: var(--accent); }
 /* 禁用的級別：**看得見、說得出原因、按不動**（C45）。
-   不用 hidden——藏起來會讓教學藥師以為工具壞了，而不是清單撐不起那一級 */
-.level[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; }
+   不用 hidden——藏起來會讓教學藥師以為工具壞了，而不是清單撐不起那一級。
+
+   **淡化只套在名稱／說明／中繼資訊，不套在原因那一行**（C51 人工留檔 S-4）：
+   原本 `opacity` 套整張卡，連唯一解釋「為什麼不能用」的那句橘字也一起淡掉——
+   那是使用者最需要讀的一句，卻被當成裝飾處理，對比也可能掉到 4.5:1 以下。 */
+.level[aria-disabled="true"] { cursor: not-allowed; }
+.level[aria-disabled="true"] .lv-name,
+.level[aria-disabled="true"] .lv-desc,
+.level[aria-disabled="true"] .lv-meta { opacity: 0.55; }
 .lv-off { display: block; font-size: 0.68rem; color: var(--warning); margin-top: 0.25rem; }
 
 /* 錯題再戰（規格 v4 D29／D33）。
@@ -456,7 +464,9 @@ input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow:
     <div class="fx-result hidden" id="fxResult">
       <div class="test-info" id="fxSummary"></div>
       <div class="fx-breakdown" id="fxBreakdown"></div>
-      <!-- 未命中明細只經 textContent（D43）。畫面只列前幾筆，完整清單走下載 -->
+      <!-- 未命中明細只經 textContent（D43）。畫面只列前幾筆，完整清單走下載。
+           代碼對照由 CATEGORY_LABEL 導出，不在此硬寫（避免與分類表的措辭漂移） -->
+      <p class="fx-legend hidden" id="fxListLegend"></p>
       <div class="fx-list hidden" id="fxUnlistedList"></div>
       <div class="btn-row">
         <button id="btnFxDownload" class="ghost">下載未命中清單（純文字）</button>
