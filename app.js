@@ -398,18 +398,25 @@ const FX_LIST_CAP = 50;
  *
  * 不「順手修復」也不刪除：讀不到不代表沒有，壞 JSON 更可能是未來版本寫的
  * （沿用 `readRecords()` 的同一條紀律）。
+ *
+ * **回傳 tri-state 而不是 `null`**（依 codex-review CR-1）：
+ * 「這裡沒有清單」與「這裡有東西但我讀不出來」對後續行為的意義完全不同——
+ * 前者可以放心寫入，後者一寫就把讀不出來的那份**毀掉**，
+ * 而讀不出來最可能的原因正是「未來版本寫的」。
+ *
+ * @returns {{status:'ok', payload:string}|{status:'absent'}|{status:'error'}}
  */
 function readFormulary() {
   const s = storage();
-  if (!s) return null;
+  if (!s) return { status: 'error' };            // 連 storage 都拿不到：不知道有沒有
   let raw;
-  try { raw = s.getItem(FORMULARY_KEY); } catch { return null; }
-  if (raw == null) return null;
+  try { raw = s.getItem(FORMULARY_KEY); } catch { return { status: 'error' }; }
+  if (raw == null) return { status: 'absent' };
   let o;
-  try { o = JSON.parse(raw); } catch { return null; }
-  if (!o || o.v !== FORMULARY_SCHEMA || typeof o.payload !== 'string') return null;
-  try { decodeFormulary(o.payload); } catch { return null; }   // D45：payload 必須解得開
-  return o.payload;
+  try { o = JSON.parse(raw); } catch { return { status: 'error' }; }
+  if (!o || o.v !== FORMULARY_SCHEMA || typeof o.payload !== 'string') return { status: 'error' };
+  try { decodeFormulary(o.payload); } catch { return { status: 'error' }; }
+  return { status: 'ok', payload: o.payload };
 }
 
 /** 寫入失敗回 `false`（呼叫端據此中止發布，見 D44.1 第 2 段） */
@@ -430,10 +437,18 @@ function writeFormulary(payload) {
   }
 }
 
+/**
+ * 讀網址上的 `fx`。**「有這個參數但值是空的」與「沒有這個參數」必須分得開**
+ * （依 codex-review CR-4）：`?fx=` 是一條壞連結，§5.3 要求它走完整解碼並提示失敗，
+ * 而不是靜默當成通用版。
+ *
+ * @returns {{present: boolean, value: string}}
+ */
 function fxFromUrl() {
   try {
-    return new URL(window.location.href).searchParams.get(FX_PARAM);
-  } catch { return null; }
+    const p = new URL(window.location.href).searchParams;
+    return { present: p.has(FX_PARAM), value: p.get(FX_PARAM) ?? '' };
+  } catch { return { present: false, value: '' }; }
 }
 
 /**
@@ -450,8 +465,17 @@ function cleanupFxParam() {
     const u = new URL(window.location.href);
     const raw = u.search.slice(1);
     if (!raw) return true;
-    const kept = raw.split('&').filter((kv) => kv && kv.split('=')[0] !== FX_PARAM);
-    if (kept.length === raw.split('&').filter(Boolean).length) return true;   // 沒有 fx：冪等
+    const segs = raw.split('&');
+    // **比對解碼後的名稱**（依 codex-review CR-3）：`searchParams.get()` 會把 `%66x`
+    // 解成 `fx` 而讀得到它，raw 字串比對卻刪不掉——那會留下「已消費卻還在網址上」的狀態。
+    // 同時**不過濾空 segment**：`?a=1&&b=2` 的那個空段也是「其餘 query」的一部分，
+    // 順手正規化掉就不叫「精確保留」了。
+    const kept = segs.filter((kv) => {
+      let k = kv.split('=')[0];
+      try { k = decodeURIComponent(k); } catch { /* 壞的百分號序列：照原樣比 */ }
+      return k !== FX_PARAM;
+    });
+    if (kept.length === segs.length) return true;                    // 沒有 fx：冪等
     window.history.replaceState(null, '', u.pathname + (kept.length ? `?${kept.join('&')}` : '') + u.hash);
     return true;
   } catch (e) {
@@ -529,15 +553,28 @@ function activateFormulary(payload, { persist }) {
  */
 function bootFormulary() {
   const saved = readFormulary();
-  if (saved) activateFormulary(saved, { persist: false });
+  if (saved.status === 'ok') activateFormulary(saved.payload, { persist: false });
 
   const fx = fxFromUrl();
   let bootError = '';
-  if (fx) {
-    const r = activateFormulary(fx, { persist: true });
-    // 失敗時 **fx 保留在網址上**，使用者可以重整重試
-    if (r.ok) cleanupFxParam();     // cleanup 失敗也不回滾（D44.1 第 3 段）
-    else if (r.code !== 'SUPERSEDED') bootError = r.msg;
+  if (fx.present) {
+    /**
+     * **讀失敗時不得寫入**（CLAUDE.md 的既有紀律，codex-review CR-1）。
+     *
+     * 讀不出來最可能的原因是「未來版本寫的」，覆寫等於把它靜默毀掉。
+     * 此時仍讓這條連結在**本頁生效**（使用者的操作要有回應），但
+     * **既不保存、也不清掉網址上的 `fx`**——cleanup 本來就只是「成功提交後」的動作
+     * （D44.1 第 3 段），不保存卻把 fx 清掉，重整後連這一份也沒了。
+     */
+    const persist = saved.status !== 'error';
+    const r = activateFormulary(fx.value, { persist });
+    if (r.ok) {
+      if (persist) cleanupFxParam();     // cleanup 失敗也不回滾（D44.1 第 3 段）
+      else bootError = '本機已有一份無法讀取的院內清單，為避免覆寫它，這次只在本頁生效、'
+        + '不會保存。請保留這條網址。';
+    } else if (r.code !== 'SUPERSEDED') {
+      bootError = r.msg;                 // 失敗時 fx 保留在網址上，使用者可以重整重試
+    }
   }
   // 錯誤訊息交給 `renderFormularyState` 一起輸出——分兩處寫的話，
   // 後跑的那個會把先寫的訊息蓋掉，而畫面上看起來就是「靜默失敗」
@@ -623,6 +660,11 @@ async function loadExcluded() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     data = await res.json();
   } catch (e) {
+    // **失敗路徑也要過 current-op gate**（依 codex-review CR-2）：
+    // 原本只有成功路徑檢查 op，於是「先開頁→返回→再開頁」時，
+    // 第一次那個**晚到的失敗**會蓋掉第二次的成功結果，產連結被誤停用到重整為止。
+    // D46 說的是「只有當前 operation 可以 commit」——失敗也是一種 commit。
+    if (op !== state.fxOp) return;
     state.excludedError = `無法讀取排除清單（${e.message}），因此無法分類未命中的品項。`;
     return;
   }
@@ -671,6 +713,9 @@ const fxError = (msg) => {
   $('fxError').textContent = msg;
   show($('fxError'));
   show($('fxResult'), false);
+  // **連結要明確收掉**，不能只靠隱藏外層容器（依 codex-review TG-8）：
+  // 上一輪產出的連結留在畫面上，教學藥師會以為它還對應現在這份清單
+  show($('fxLinkBox'), false);
   state.fxDraft = null;
 };
 
@@ -725,8 +770,12 @@ function analyzeFormulary() {
   const url = fxUrlFor(payload);
   if (url.length > MAX_URL_LEN) {
     show($('fxLinkBox'), false);
-    return fxErrorKeepResult(`清單 ${cls.matched.length} 品項，產生的網址 ${url.length} 字元，`
-      + `超出可分享連結上限 ${MAX_URL_LEN} 字元，請縮減清單或分批。`);
+    // **三個數字不是同一個**（依 codex-review CR-5）：使用者貼的是 `distinct` 筆相異字號，
+    // 真正撐大網址的是進 payload 的 `payloadIds`（命中 ∪ excluded 內的），
+    // 而 `matched` 只是其中可出題的那些。教學藥師是靠這行決定要縮減多少——
+    // 拿 matched 冒充清單總數，他會刪錯東西。
+    return fxErrorKeepResult(`清單 ${cls.distinct} 筆相異字號，其中 ${cls.payloadIds.length} 筆進入連結，`
+      + `產生的網址 ${url.length} 字元，超出可分享連結上限 ${MAX_URL_LEN} 字元。請縮減清單或分批。`);
   }
   $('fxLink').value = url;
   show($('fxLinkBox'));
@@ -952,6 +1001,23 @@ function startQuiz() {
         index: state.index, eligible: eligibleFor(level),
       });
     } catch (e) {
+      /**
+       * **院內版的重抽失敗是可預期的隨機結果，不是致命錯誤。**
+       *
+       * 第一回合有 D38.3 的 probe 產物護著，第二回合起走的是 `Math.random`——
+       * 而 `drawLeveledQuiz` 是有限重試（3 次）的隨機貪婪組卷。
+       * 實測一份 30 品項的清單（probe 判定 L1 可用、K=29）：**200 次重抽失敗 105 次**。
+       *
+       * 走 `fatal()` 會把起始頁與答題頁全部藏起來，只剩「無法開始測驗」，
+       * 使用者非重新整理不可——對一個「再按一次很可能就成功」的情況，那是災難性的處置。
+       * 退回起始頁說明原因即可，`state.level` 還在，再按一次就重抽。
+       */
+      if (state.fx && (e.code === 'QUIZ_ASSEMBLY_FAILED' || e.code === 'INSUFFICIENT_KEYS')) {
+        $('levelWarn').textContent = `這一級這次沒能組出題卷（院內清單品項偏少時會發生）。`
+          + '請再按一次開始，或改選其他級別。';
+        show($('levelWarn'));
+        return;
+      }
       if (e.code === 'INSUFFICIENT_KEYS') {
         return fatal(`${LEVELS[level].badge}可用答案鍵僅 ${e.available} 個，`
           + `不足 ${e.required ?? n} 個，無法出 ${n} 題。`);
@@ -2066,7 +2132,17 @@ async function downloadCard() {
   const stamp = new Date().toLocaleString('zh-TW', { hour12: false });
   g.fillText(`測驗時間 ${stamp}`, 52, y + 24);
   const ver = state.pool?.meta?.source_version;
-  g.fillText(`題庫 ${state.pool.meta.count.toLocaleString()} 題${ver ? `　·　資料版本 ${ver}` : ''}`, 52, y + 42);
+  /**
+   * **院內版的母體不是全庫。**
+   *
+   * 成績卡是新人會截圖給帶教藥師看的東西，印「題庫 3,941 題」等於宣稱這一卷抽自全庫，
+   * 而它其實只抽自院內清單的 N 個品項——分數的意義完全不同。
+   * 這與 D34.1「全額揭露」是同一條理由：使用者拿數字做判斷，數字就不能是別人的。
+   */
+  const scope = state.fx
+    ? `院內清單 ${state.fx.N.toLocaleString()} 品項`
+    : `題庫 ${state.pool.meta.count.toLocaleString()} 題`;
+  g.fillText(`${scope}${ver ? `　·　資料版本 ${ver}` : ''}`, 52, y + 42);
   g.fillStyle = T.no; g.font = sans(400, 10.5);
   g.fillText('本工具為教育練習用，非臨床調劑或給藥的辨識依據。分數不可跨難度比較。', 52, y + 64);
 

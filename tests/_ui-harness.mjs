@@ -81,7 +81,16 @@ export const fetchControl = {
   bad: new Set(),
   body: new Map(),
   urls: [],
-  reset() { this.fail.clear(); this.bad.clear(); this.body.clear(); this.urls.length = 0; },
+  /**
+   * `defer` 內的路徑不會自己完成——每次請求會把一個 `{resolve, reject}` 推進 `pending`，
+   * 由測試決定誰先誰後（D46 的競態沒有這個就寫不出來，見 codex-review TG-2）。
+   */
+  defer: new Set(),
+  pending: [],
+  reset() {
+    this.fail.clear(); this.bad.clear(); this.body.clear();
+    this.defer.clear(); this.pending.length = 0; this.urls.length = 0;
+  },
 };
 
 /**
@@ -92,6 +101,19 @@ export const fetchControl = {
  */
 export const sinkLog = {
   calls: [],            // {sink, id, value}
+  /**
+   * **明列的排除項**（依 codex-review TG-6）。清冊的原意是「不得默默漏列」，
+   * 不是「什麼都要監控」——排除的每一項都要說得出為什麼。
+   *
+   * - `disabled`：布林狀態，不承載字串，注入不了東西
+   * - `style.width`：只由 `${百分比}%` 這種算出來的數值字串寫入，不接受使用者輸入
+   * - `classList`：只吃程式碼裡的固定字面值
+   */
+  excluded: Object.freeze({
+    disabled: '布林狀態，不承載字串',
+    'style.width': '只寫入算出來的百分比，不接受使用者輸入',
+    classList: '只吃固定字面值',
+  }),
   reset() { this.calls.length = 0; },
   /** 某段文字是否經由**非純文字** sink 進入 DOM */
   taintedBy(needle) {
@@ -129,7 +151,7 @@ class El {
     this._html = '';
     this._attrs = {};
     this._text = '';
-    this.value = '';
+    this._value = '';
     this.className = '';
     this.disabled = false;
     this.style = {};
@@ -164,6 +186,21 @@ class El {
   }
 
   get textContent() { return this._text; }
+
+  /** property assignment sink（C50 明列的一類，依 codex-review TG-6 補上） */
+  set value(v) {
+    sinkLog.calls.push({ sink: 'value', id: this.id, value: String(v ?? '') });
+    this._value = v;
+  }
+
+  get value() { return this._value; }
+
+  set alt(v) {
+    sinkLog.calls.push({ sink: 'alt', id: this.id, value: String(v ?? '') });
+    this._attrs.alt = v;
+  }
+
+  get alt() { return this._attrs.alt ?? ''; }
 
   set outerHTML(v) {
     sinkLog.calls.push({ sink: 'outerHTML', id: this.id, value: String(v ?? '') });
@@ -342,6 +379,15 @@ export function installDom() {
   globalThis.fetch = async (u) => {
     fetchControl.urls.push(u);
     const name = String(u).replace('data/', '');
+    if (fetchControl.defer.has(name)) {
+      return new Promise((resolve, reject) => {
+        fetchControl.pending.push({
+          name,
+          ok: (body) => resolve({ ok: true, status: 200, json: async () => body }),
+          fail: (msg = 'network down') => reject(new Error(msg)),
+        });
+      });
+    }
     if (fetchControl.fail.has(name)) return { ok: false, status: 503, json: async () => ({}) };
     if (fetchControl.bad.has(name)) {
       return { ok: true, status: 200, json: async () => { throw new SyntaxError('bad json'); } };
