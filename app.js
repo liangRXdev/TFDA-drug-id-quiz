@@ -20,7 +20,7 @@ import {
 import {
   tokenize, normalizeLicense, encodeFormulary, decodeFormulary,
   classifyFormulary, buildExcludedIndex, Category, CATEGORY_LABEL,
-  prepareFormulary, probeLevel, minUsableK,
+  prepareFormulary, probeLevel, minUsableK, splitMissing,
 } from './formulary.js';
 
 const SCHEMA = 1;
@@ -581,6 +581,9 @@ function bootFormulary() {
   // 錯誤訊息交給 `renderFormularyState` 一起輸出——分兩處寫的話，
   // 後跑的那個會把先寫的訊息蓋掉，而畫面上看起來就是「靜默失敗」
   renderFormularyState(bootError);
+  // D41 的分辨要抓 `excluded.json`，非同步。**先畫較弱但成立的措辭，到手再細分**——
+  // 反過來（先講強的、之後改口）等於先給一次假警報
+  refineMissing(bootError);
 }
 
 /**
@@ -623,6 +626,26 @@ function fxUnlistedSentence() {
 }
 
 /**
+ * D41（v5.11）：payload 有、但這一卷用不到的品項。
+ *
+ * **這句是 muted 不是橘字，而且刻意分兩種強度**：
+ * - 分辨得出來（`excluded.json` 到手）→ 說「在資料集中但不適合出題」，這是常態，
+ *   教學藥師在產連結頁早就按類別看過同一批
+ * - 分辨不出來 → 只講兩種情形都成立的「目前不在出題範圍」
+ *
+ * 「已不在最新資料中」這句**只由橘字的 D41 告知講**，而且只在真的消失時才講。
+ * 對真實清單恆亮的警告，一個月後就沒有人讀了——那正是 D41 要防的事。
+ */
+function fxMissingSentence() {
+  const miss = state.fx?.missing ?? [];
+  if (!miss.length) return '';
+  const split = splitMissing(miss, state.excluded);
+  if (!split) return `｜另有 ${miss.length} 筆院內品項目前不在出題範圍`;
+  if (!split.excluded.length) return '';        // 全數真的消失，交給橘字的告知講
+  return `｜另有 ${split.excluded.length} 筆在外觀資料集中，但外觀題目品質不足或非固體口服`;
+}
+
+/**
  * 起始頁的題庫規模說明。
  *
  * **院內版不得宣稱「題庫 3,941 題」**（C51 人工留檔 S-3）：那一卷只從命中的 N 個
@@ -661,9 +684,12 @@ function renderFormularyState(bootError = '') {
   if (on) {
     $('sFxN').textContent = String(state.fx.N);
     $('sFxUnlisted').textContent = fxUnlistedSentence();
-    // D41：品項消失是**降級不是阻斷**，而且要說出精確數字
-    if (state.fx.missing.length) {
-      warn.push(`清單中 ${state.fx.missing.length} 個品項已不在最新資料中，本次以 ${state.fx.N} 品項出題。`);
+    $('sFxMissing').textContent = fxMissingSentence();
+    // D41：品項**真的消失**是降級不是阻斷，而且要說出精確數字。
+    // 分辨不出來時一個字都不能講——見 `fxMissingSentence()` 的說明
+    const split = splitMissing(state.fx.missing, state.excluded);
+    if (split?.absent.length) {
+      warn.push(`清單中 ${split.absent.length} 個品項已不在最新資料中，本次以 ${state.fx.N} 品項出題。`);
     }
     if (fxAllDisabled()) {
       warn.push('目前這份清單三個級別都組不出題卷，請教學藥師重新產生連結。');
@@ -704,13 +730,21 @@ const FX_CATS = [
 ];
 
 /**
- * D47：`excluded.json` 只在**打開產連結頁時**才抓。
+ * D47：`excluded.json` 只在**需要它的時候**才抓——打開產連結頁，
+ * 或院內版載入後發現有 payload id 不在 pool 裡（D41 的分辨，v5.11）。
  *
- * 它取不到、或與 `pool.json` 不成對時，**只有產連結功能停用**——
- * 通用版與院內版出題完全不受影響（硬性要求：新增的檔案不得拖垮既有功能）。
+ * 它取不到、或與 `pool.json` 不成對時，**出題完全不受影響**：
+ * 產連結功能停用，院內版的 D41 訊息退回較弱但成立的措辭
+ * （硬性要求：新增的檔案不得拖垮既有功能）。
+ *
+ * **錯誤不由本函式落到 `state`**（v5.11）：呼叫端各自決定要不要記住失敗。
+ * 產連結頁必須記住（否則會拿半套分類去產連結）；起始頁的 D41 分辨**不得記住**——
+ * 一次開站時的暫時性失敗會讓整個 session 都產不了連結，而那次失敗與產連結無關。
+ *
+ * @returns {Promise<{ok: true}|{ok: false, msg: string}|{ok: false, superseded: true}>}
  */
 async function loadExcluded() {
-  if (state.excluded || state.excludedError) return;
+  if (state.excluded) return { ok: true };
   const op = ++state.fxOp;
   let data;
   try {
@@ -722,18 +756,34 @@ async function loadExcluded() {
     // 原本只有成功路徑檢查 op，於是「先開頁→返回→再開頁」時，
     // 第一次那個**晚到的失敗**會蓋掉第二次的成功結果，產連結被誤停用到重整為止。
     // D46 說的是「只有當前 operation 可以 commit」——失敗也是一種 commit。
-    if (op !== state.fxOp) return;
-    state.excludedError = `無法讀取排除清單（${e.message}），因此無法分類未命中的品項。`;
-    return;
+    if (op !== state.fxOp) return { ok: false, superseded: true };
+    return { ok: false,
+      msg: `無法讀取排除清單（${e.message}），因此無法分類未命中的品項。` };
   }
-  if (op !== state.fxOp) return;                     // D46：有更新的操作接手了
+  if (op !== state.fxOp) return { ok: false, superseded: true };   // D46：有更新的操作接手了
   try {
     state.excluded = buildExcludedIndex(state.pool, data);
   } catch (e) {
     // 兩檔不成對（例如只更新了其中一份）→ 一律不產連結，不做半套分類
-    state.excludedError = `排除清單與題庫不成對或格式不符（${e.code ?? 'INVALID'}），`
-      + '無法分類未命中的品項。請重新整理，若持續發生請回報。';
+    return { ok: false,
+      msg: `排除清單與題庫不成對或格式不符（${e.code ?? 'INVALID'}），`
+        + '無法分類未命中的品項。請重新整理，若持續發生請回報。' };
   }
+  return { ok: true };
+}
+
+/**
+ * D41 的分辨（v5.11）。**只在真的需要時才抓 `excluded.json`**：
+ * `missing` 是空的就完全不碰網路，而那是絕大多數清單的情形。
+ *
+ * 失敗**不寫 `state.excludedError`**：這次失敗不該讓產連結頁跟著壞掉。
+ */
+async function refineMissing(bootError = '') {
+  if (!state.fx?.missing.length || state.excluded) return;
+  const r = await loadExcluded();
+  if (r.superseded) return;            // D46：清單已被換掉或切回全題庫，這次結果作廢
+  if (!state.fx) return;               // 期間切回了全題庫
+  renderFormularyState(bootError);     // 成功就細分，失敗就維持較弱的措辭
 }
 
 function openFormularyPage() {
@@ -741,13 +791,19 @@ function openFormularyPage() {
   show($('formulary'));
   show($('fxResult'), false);
   show($('fxError'), false);
-  loadExcluded().then(() => {
-    if (state.excludedError) {
-      $('fxError').textContent = state.excludedError;
-      show($('fxError'));
-      $('btnFxAnalyze').disabled = true;
-    }
+  if (state.excludedError) return failFormularyPage(state.excludedError);
+  loadExcluded().then((r) => {
+    if (r.ok || r.superseded) return;
+    // 產連結頁**要記住**失敗：拿半套分類去產連結，會產出一份分類錯誤的清單
+    state.excludedError = r.msg;
+    failFormularyPage(r.msg);
   });
+}
+
+function failFormularyPage(msg) {
+  $('fxError').textContent = msg;
+  show($('fxError'));
+  $('btnFxAnalyze').disabled = true;
 }
 
 function closeFormularyPage() {
