@@ -1743,16 +1743,57 @@ describe('A66 D55 aggregate：一格可用、一格不可用時，級別仍然�
     assert.equal(Number(dom.$('qTotal').textContent), 10);
   });
 
+  test('A67 每一個被禁用的卷長都要有原因——含非標準卷長（人工留檔發現）', async () => {
+    /**
+     * 〔堵〕原因句只掃 `QUIZ_LENGTHS`。院內版的選擇器會多畫一個該級上限
+     *       （這份 fixture 是 13），它同樣可能被禁用——只掃標準卷長會讓那顆按鈕
+     *       變灰卻沒有任何解釋。**單元測試與靜態契約都沒抓到，是人工瀏覽器留檔抓到的。**
+     */
+    needPool();
+    const ids = pickIds(16, 4501);
+    const payload = payloadOf(ids);
+    const p = expectProbe(payload, Level.L1, ids);
+    // fixture 自檢：必須真的有一個「非標準卷長且被禁用」的格
+    assert.deepEqual(p.selectable, [10, 13], 'fixture 的可選卷長變了，這條就驗不到東西');
+    assert.equal(p.byLen[13].available, false, 'fixture 的 13 題格必須是不可用的');
+    assert.equal(p.byLen[13].code, 'QUIZ_ASSEMBLY_FAILED');
+
+    const dom = await boot({ saved: savedJson(payload) });
+    cardFor(dom, Level.L1).click();
+    const shown = [...dom.$('lenPick').querySelectorAll('.qlen')].map((b) => Number(b.dataset.len));
+    assert.deepEqual(shown, [10, 13, 20], '選擇器沒畫出該級的非標準卷長');
+
+    const warn = dom.$('lenWarn').textContent;
+    for (const len of [13, 20]) {
+      assert.ok(warn.includes(String(len)),
+        `${len} 題被禁用卻沒有原因（C55）：${warn}`);
+    }
+    // 13 是組卷失敗、20 是品項數不足——兩種原因的措辭必須不同
+    assert.match(warn, /組不出 13 題/, '組卷失敗被說成品項數不足');
+    assert.match(warn, /不足以出 20 題/, '算術前置拒絕沒有說品項數不足');
+  });
+
   test('A67 C55 的原因必須分辨「品項數不足」與「這份清單組不出」', async () => {
     needPool();
-    // 前置拒絕（LEN_ABOVE_CAP）：K=16 出 20 題是純算術不足
     const ids = pickIds(16, 4501);
     const dom = await boot({ saved: savedJson(payloadOf(ids)) });
     cardFor(dom, Level.L1).click();
-    const warn = dom.$('lenWarn').textContent;
-    assert.match(warn, /不足以出 20 題|可出題藥名/, `未說明品項數不足：${warn}`);
+    // 原因是多條合併（13 與 20 各一句），**必須逐句檢查**——
+    // 對整串做 `!/組不出/` 只證明「沒有任何一句提到組不出」，
+    // 而正確的畫面本來就該有一句提到（13 題那句）
+    const parts = dom.$('lenWarn').textContent.split('；');
+    const of = (len) => parts.find((s) => s.includes(`${len} 題`));
+
+    const p20 = of(20);
+    assert.ok(p20, '20 題沒有原因句');
+    assert.match(p20, /不足以出/, `20 題是算術前置拒絕，應說品項數不足：${p20}`);
     // 〔堵〕兩種原因共用一句「品項數不足」——使用者加了品項仍撞同一面牆
-    assert.ok(!/組不出/.test(warn), '算術前置拒絕不該說成「組不出」');
+    assert.ok(!/組不出/.test(p20), `算術前置拒絕不該說成「組不出」：${p20}`);
+
+    const p13 = of(13);
+    assert.ok(p13, '13 題沒有原因句');
+    assert.match(p13, /組不出/, `13 題是實際組卷失敗，不該歸因於品項數：${p13}`);
+    assert.ok(!/不足以出/.test(p13), `組卷失敗不該說成品項數不足：${p13}`);
   });
 });
 

@@ -1183,7 +1183,7 @@ function renderLenPicker() {
   const lv = state.level;
   // 未選難度時只畫標準卷長；選定後畫該級真正可選的那些
   // （院內版可能是 `[10, 19]`——19 是 D39 的短卷上限，不是標準卷長）
-  const lens = lv ? [...new Set([...QUIZ_LENGTHS, ...lensFor(lv)])].sort((a, b) => a - b) : QUIZ_LENGTHS;
+  const lens = lv ? shownLens(lv) : QUIZ_LENGTHS;
   $('lenPick').innerHTML = lens.map((len) => {
     const off = lv ? lenOff(lv, len) : false;
     return `<button class="qlen" role="radio" data-len="${len}"
@@ -1199,11 +1199,22 @@ function renderLenPicker() {
   show($('lenWarn'), !!reason);
 }
 
-/** 已選難度下，被禁用的那些卷長的原因（可能不只一個，逐條列出） */
+/**
+ * 已選難度下，被禁用的那些卷長的原因（可能不只一個，逐條列出）。
+ *
+ * **掃的是畫面上實際畫出來的那些卷長，不是 `QUIZ_LENGTHS`。**
+ * 院內版會多出一個非標準卷長（該級上限，例如 13），它同樣可能被禁用——
+ * 只掃 `QUIZ_LENGTHS` 會讓那個按鈕變灰卻沒有任何解釋，
+ * 而 C55 要求的正是「禁用原因必須寫出來」。人工瀏覽器留檔抓到的。
+ */
 function lenOffReasonForOff(level) {
-  return QUIZ_LENGTHS.filter((len) => lenOff(level, len))
+  return shownLens(level).filter((len) => lenOff(level, len))
     .map((len) => lenOffReason(level, len)).filter(Boolean).join('；');
 }
+
+/** 該級在選擇器上實際畫出來的卷長：標準卷長 ∪ 該級可選的（含非標準的上限） */
+const shownLens = (level) =>
+  [...new Set([...QUIZ_LENGTHS, ...lensFor(level)])].sort((a, b) => a - b);
 
 /**
  * C53.1：選卷長。**禁用格必須是程式化 no-op**（同 C45／D55.1）——
