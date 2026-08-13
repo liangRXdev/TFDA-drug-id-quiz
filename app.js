@@ -9,6 +9,7 @@
  */
 import {
   normalize, squash, judge, makeHint, QUIZ_SIZE,
+  QUIZ_LENGTHS, DEFAULT_QUIZ_LEN, MIN_QUIZ_LEN,
   QState, transition, scoreQuiz, HINTED_MARK,
   Level, CHOICE_COUNT, L2_LOAD_TIMEOUT_MS,
   buildIndex, eligibleKeys, drawLeveledQuiz, judgeChoice,
@@ -20,7 +21,7 @@ import {
 import {
   tokenize, normalizeLicense, encodeFormulary, decodeFormulary,
   classifyFormulary, buildExcludedIndex, Category, CATEGORY_LABEL,
-  prepareFormulary, probeLevel, minUsableK, splitMissing,
+  prepareFormulary, probeLevel, minUsableK, splitMissing, selectableLengths,
 } from './formulary.js';
 
 const SCHEMA = 1;
@@ -81,7 +82,13 @@ const state = {
   index: null,
   eligible: new Map(),       // level → Set<ans>，整回合重複使用
   level: null,               // 使用者在選擇器上的選取
+  /**
+   * C53：使用者選的卷長。**畫面 `aria-checked`、CTA 文字、`startQuiz` 守門
+   * 三者一律讀這一個值**——三份各自維護的狀態一定會漂移。
+   */
+  quizLen: DEFAULT_QUIZ_LEN,
   quizLevel: null,           // 本回合實際成卷的級別（成績卡以此為準）
+  quizLenUsed: null,         // 本回合實際的卷長（紀錄寫入以此為準，不讀 state.quizLen）
   questions: [],
   idx: 0,
   voided: 0,
@@ -188,8 +195,14 @@ async function loadPool() {
     return fatal('題庫是空的，無法出題。');
   }
   const keys = new Set(data.items.map((i) => i.ans));
-  if (keys.size < QUIZ_SIZE) {
-    return fatal(`題庫可用答案鍵僅 <code>${keys.size}</code> 個，不足 ${QUIZ_SIZE} 題，無法開始測驗。`);
+  /**
+   * D52 全域開機門檻。**語意是「低於此值連最寬鬆的 L3 都不可能出最短卷」**，
+   * 不保證任何一級真的可用——級別可用性仍由 D38.1 的級別特定算術
+   * ＋ D38.2 的實際組卷決定。v5.2 之前寫死 20，會讓一個能正常出 10 題的題庫被判死。
+   */
+  if (keys.size < MIN_QUIZ_LEN) {
+    return fatal(`題庫可用答案鍵僅 <code>${keys.size}</code> 個，`
+      + `不足 ${MIN_QUIZ_LEN} 個，無法出最短的 ${MIN_QUIZ_LEN} 題測驗。`);
   }
 
   state.pool = data;
@@ -208,8 +221,10 @@ async function loadPool() {
   renderLevelPicker();
   renderRecords();
   show($('start'));
-  $('qTotal').textContent = QUIZ_SIZE;
-  $('introN').textContent = QUIZ_SIZE;
+  $('qTotal').textContent = DEFAULT_QUIZ_LEN;
+  // 起始頁的說明句列出**全部可選卷長**，不寫死單一數字——
+  // 寫 20 而選擇器上有 10，說明與控制項就對不起來
+  $('introN').textContent = QUIZ_LENGTHS.join(' 或 ');
   $('fTotal').textContent = DECK_SIZE;
 }
 
@@ -263,18 +278,70 @@ function validEntry(e, { max, int = false }) {
 }
 
 /**
- * E6：單一難度的完整性判定。**兩項都合法才採信。**
+ * 單一「卷長格」的完整性判定（E6 的既有粒度）。
  *
- * 第一個完成的回合必定同時寫入兩項（無紀錄時任何有限值都算破紀錄），
- * 因此「只有一項」本身就代表資料被動過；部分採信會讓半壞的紀錄留在畫面上。
- * `bestStreak` 的上界是 `QUIZ_SIZE`：凡走到 `finish()` 的回合分母恆為 20（F9）。
+ * **兩項都合法才採信**：第一個完成的回合必定同時寫入兩項（無紀錄時任何有限值
+ * 都算破紀錄），因此「只有一項」本身就代表資料被動過。
+ *
+ * `bestStreak` 的上界是**該格的卷長**（D51.3）——10 題格出現 11 就是被動過。
+ * v5.2 之前寫死 `QUIZ_SIZE`，那在只有一種卷長時才成立。
+ *
+ * @returns {object|null} `null` ＝ 損毀（呼叫端據此丟棄整個難度）
  */
-function validRecord(r) {
-  if (!r || typeof r !== 'object') return null;
-  const bestScore = validEntry(r.bestScore, { max: 100 });
-  const bestStreak = validEntry(r.bestStreak, { max: QUIZ_SIZE, int: true });
+function validSlot(s, len) {
+  if (!s || typeof s !== 'object') return null;
+  const bestScore = validEntry(s.bestScore, { max: 100 });
+  const bestStreak = validEntry(s.bestStreak, { max: len, int: true });
   return bestScore && bestStreak ? { bestScore, bestStreak } : null;
 }
+
+const isPlainObject = (o) => !!o && typeof o === 'object' && !Array.isArray(o);
+
+/**
+ * D51.2：單一難度的合法形狀判定。
+ *
+ * **頂層（20 題）與 `byLen["10"]` 各自可以整組缺席，至少一組合法即成立。**
+ * 第一次就選 10 題的使用者，頂層本來就不存在——沿用 v5.2-r1 的
+ * 「兩項都要有」會讓他看到「新紀錄！」然後重整就消失（覆審判定 R-1）。
+ *
+ * 20 題紀錄**維持在頂層原位**（不搬進 `byLen`），這樣舊版讀到新資料時
+ * 仍能正確讀出 20 題紀錄，不會因為看不懂而當成無紀錄、進而用一次舊回合覆蓋掉。
+ *
+ * @returns {object|null} `null` ＝ 該難度整組丟棄；
+ *   物件的 key 是卷長，缺席的卷長不出現
+ */
+function validRecord(r) {
+  if (!isPlainObject(r)) return null;
+  const out = {};
+
+  // 頂層 ＝ 20 題格。兩項皆缺席是合法的（只有 10 題紀錄）；
+  // 只有一項存在就是被動過 → 整個難度丟棄
+  const hasTop = r.bestScore !== undefined || r.bestStreak !== undefined;
+  if (hasTop) {
+    const top = validSlot(r, QUIZ_SIZE);
+    if (!top) return null;
+    out[QUIZ_SIZE] = top;
+  }
+
+  if (r.byLen !== undefined) {
+    if (!isPlainObject(r.byLen)) return null;                 // 陣列／字串／null ＝ 損毀
+    for (const [k, slot] of Object.entries(r.byLen)) {
+      const len = Number(k);
+      // 未知卷長：忽略該格，**不觸發 E6**（同難度其他格照常採信）。
+      // `QUIZ_SIZE` 也在忽略之列——20 題的唯一真相來源是頂層，
+      // 採信 `byLen["20"]` 會讓同一份 storage 出現兩個 20 題紀錄
+      if (!QUIZ_LENGTHS.includes(len) || len === QUIZ_SIZE) continue;
+      const valid = validSlot(slot, len);
+      if (!valid) return null;                                // 已知卷長但損毀 → 丟整個難度
+      out[len] = valid;
+    }
+  }
+
+  return Object.keys(out).length ? out : null;
+}
+
+/** 該難度是否有任何一個卷長的紀錄 */
+const recLengths = (rec) => QUIZ_LENGTHS.filter((len) => rec?.[len]);
 
 /**
  * 讀取紀錄。**任何失效情境都不得執行 storage mutation**——
@@ -315,31 +382,53 @@ function readRecords() {
  *   `null` = 無 storage 或寫入失敗（E3）。呼叫端據此**不顯示「新紀錄！」**——
  *   宣稱已保存而實際失敗，使用者要到下次開啟才會發現紀錄不見了。
  */
-function writeRecords(level, score, streak) {
+/**
+ * 記憶體形狀 → storage 形狀（D51.1）。
+ *
+ * **20 題留在頂層、不搬進 `byLen`**：舊版的 `validRecord` 只認得頂層那兩個欄位，
+ * 搬走等於讓舊版讀到「無紀錄」，而它接著會把任何分數都當成破紀錄寫回去。
+ */
+function toStorageShape(rec) {
+  const out = {};
+  if (rec[QUIZ_SIZE]) {
+    out.bestScore = rec[QUIZ_SIZE].bestScore;
+    out.bestStreak = rec[QUIZ_SIZE].bestStreak;
+  }
+  const byLen = {};
+  for (const len of QUIZ_LENGTHS) {
+    if (len !== QUIZ_SIZE && rec[len]) byLen[len] = rec[len];
+  }
+  if (Object.keys(byLen).length) out.byLen = byLen;
+  return out;
+}
+
+function writeRecords(level, len, score, streak) {
   const ls = storage();
   if (!ls) return null;
   // 讀不到就**不寫**（E2）。讀取失敗不代表沒有紀錄——照寫等於用一筆看不見的
   // 舊快照覆蓋掉一筆可能更好的紀錄，而使用者到下次開啟才會發現最佳成績退步了
   const cur = readRecords();
   if (!cur) return null;
-  const prev = cur[level] || {};
+  const prevLv = cur[level] || {};
+  const prev = prevLv[len] || {};                      // **本卷長那一格**，不跨卷長比較
   const stamp = { date: today(), pool: poolHash() };
   const fresh = [];
-  const merged = { ...prev };
+  const slot = { ...prev };
   if (!prev.bestScore || score > prev.bestScore.value) {
-    merged.bestScore = { value: score, ...stamp };
+    slot.bestScore = { value: score, ...stamp };
     fresh.push('bestScore');
   }
   if (!prev.bestStreak || streak > prev.bestStreak.value) {
-    merged.bestStreak = { value: streak, ...stamp };
+    slot.bestStreak = { value: streak, ...stamp };
     fresh.push('bestStreak');
   }
   if (!fresh.length) return { records: cur, fresh: [] };   // 沒破紀錄 → 零 storage mutation
+  const mergedLv = { ...prevLv, [len]: slot };
   const next = { schema: RECORDS_SCHEMA };
-  for (const lv of LEVEL_ORDER) if (cur[lv]) next[lv] = cur[lv];
-  next[level] = merged;
+  for (const lv of LEVEL_ORDER) if (cur[lv]) next[lv] = toStorageShape(cur[lv]);
+  next[level] = toStorageShape(mergedLv);
   try { ls.setItem(RECORDS_KEY, JSON.stringify(next)); } catch { return null; }   // E3
-  return { records: { ...cur, [level]: merged }, fresh };
+  return { records: { ...cur, [level]: mergedLv }, fresh };
 }
 
 /** E7：只移除**精確的**那一個 key。前綴掃描今日無害，新增 `:settings` 那天就會誤刪 */
@@ -370,16 +459,26 @@ function renderRecords() {
   // 清除成功後 `recordsBox` 會消失，提示若跟著被收走，
   // 按下「確定清除」就變成畫面全部不見、沒有任何回應
   show($('discRecords'), levels.length > 0);
-  $('recordsSummary').textContent = levels
-    .map((lv) => `${LEVELS[lv].name} ${recs[lv].bestScore.value.toFixed(1)}`).join(' · ');
+  // C56：摘要**必須帶卷長標籤**。10 題卷答對 9 題就是 90 分，與 20 題的 90 分
+  // 不是同一件事——取 max 或省略標籤，等於在呈現層重新製造 D51 在資料層禁止的比較
+  $('recordsSummary').textContent = levels.map((lv) => {
+    const parts = recLengths(recs[lv])
+      .map((len) => `${len} 題 ${recs[lv][len].bestScore.value.toFixed(1)}`);
+    return `${LEVELS[lv].name} ${parts.join('／')}`;
+  }).join(' · ');
   show($('clearConfirm'), false);
   show($('recordsNote'), false);
   $('recordsBody').innerHTML = levels.map((lv) => {
-    const r = recs[lv];
+    // 無紀錄的卷長**不畫空殼**（沿用 V5.1 的既有行為：擺一排「—」只是噪音）
+    const blocks = recLengths(recs[lv]).map((len) => {
+      const r = recs[lv][len];
+      return `<div class="rec-len"><div class="rec-len-k">${len} 題</div>
+        ${recLine('最高分', r.bestScore.value.toFixed(1), r.bestScore)}
+        ${recLine('最長連對', `${r.bestStreak.value} 題`, r.bestStreak)}</div>`;
+    }).join('');
     return `<div class="rec">
       <div class="rec-lv"><span class="badge">${LEVELS[lv].badge}</span></div>
-      ${recLine('最高分', r.bestScore.value.toFixed(1), r.bestScore)}
-      ${recLine('最長連對', `${r.bestStreak.value} 題`, r.bestStreak)}
+      ${blocks}
     </div>`;
   }).join('');
 }
@@ -947,8 +1046,11 @@ function renderFxBreakdown(cls) {
 function renderFxLevels(levels) {
   $('fxLevels').innerHTML = LEVEL_ORDER.map((lv) => {
     const p = levels[lv];
+    // v5.2：一個級別可能只撐得起 10 題、也可能兩種卷長都行。逐一列出可用的卷長，
+    // 只印最長的那個會讓教學藥師以為短卷不可用
+    const lens = (p.selectable ?? []).filter((len) => p.byLen[len]?.available);
     const detail = p.available
-      ? `可出 <span class="v">${p.quizLen}</span> 題（可出題藥名 <span class="v">${p.K}</span> 個）`
+      ? `可出 <span class="v">${lens.join('／')}</span> 題（可出題藥名 <span class="v">${p.K}</span> 個）`
       : `不可用：${escapeHtml(p.code === 'K_BELOW_MIN'
         ? `可出題藥名 ${p.K} 個，至少要 ${minUsableK(lv)} 個`
         : p.reason ?? '組不出完整題卷')}`;
@@ -1025,15 +1127,114 @@ function renderLevelPicker() {
  */
 function resetLevel() {
   state.level = null;
+  state.quizLen = DEFAULT_QUIZ_LEN;              // C53.1：返回起始頁時卷長一併重設
   $('levelPick').querySelectorAll('.level').forEach((el) => {
     el.setAttribute('aria-checked', 'false');
     // 禁用狀態**不因重設而解除**：它是清單撐不撐得起這一級的性質，
     // 與「這一回合選了誰」無關（C45）
     el.disabled = levelOff(el.dataset.level);
   });
+  renderLenPicker();
   show($('levelWarn'), false);
   $('btnStart').disabled = true;
   $('btnStart').textContent = '請先選擇難度';
+}
+
+// ── C53 卷長選擇（10 / 20 題）────────────────────────────────────────
+
+/**
+ * 該 `(level, 卷長)` 格是否可用（D55）。
+ *
+ * 通用版恆可用——全庫的可用性由 D52 的開機門檻與 `startQuiz` 的失敗路徑處理，
+ * 這裡不重覆一套算術判定（那正是 D38 花整段修掉的錯）。
+ * 院內版一律讀 probe 的**實際組卷結果**。
+ */
+/**
+ * 該級可選的卷長（D55）。
+ *
+ * 院內版直接讀 probe 算好的；通用版現算——全庫的 K 很大，通常就是 `[10, 20]`，
+ * 但題庫小到只撐得起 10 題時（D52 放寬門檻後這是合法狀態）也要正確收斂。
+ */
+function lensFor(level) {
+  if (state.fx) return state.fx.levels[level]?.selectable ?? [];
+  return selectableLengths(level, eligibleFor(level).size);
+}
+
+const lenOff = (level, len) => (state.fx
+  ? !state.fx.levels[level]?.byLen[len]?.available
+  // 通用版不做實際組卷判定（既有設計：全庫恆可用，失敗走 startQuiz 的 catch），
+  // 只以算術上限收斂。**不在這裡重造一套可用性模型**
+  : !lensFor(level).includes(len));
+
+/** C55：該格不可用的原因。**必須區分前置拒絕與組卷失敗**——兩者的下一步完全不同 */
+function lenOffReason(level, len) {
+  const slot = state.fx?.levels[level]?.byLen[len];
+  if (!slot || slot.available) return '';
+  if (slot.code === 'LEN_ABOVE_CAP') {
+    // 算術前置拒絕：品項數就是不夠。使用者加品項會有用
+    return `這份清單在此級的可出題藥名不足以出 ${len} 題`;
+  }
+  // 實際組卷失敗：K 過門檻但這份清單的組合條件撐不住。加品項不一定有用，
+  // 說成「品項數不足」會讓人白做工（C55）
+  return `這份清單在此級組不出 ${len} 題的完整題卷`;
+}
+
+function renderLenPicker() {
+  const lv = state.level;
+  // 未選難度時只畫標準卷長；選定後畫該級真正可選的那些
+  // （院內版可能是 `[10, 19]`——19 是 D39 的短卷上限，不是標準卷長）
+  const lens = lv ? [...new Set([...QUIZ_LENGTHS, ...lensFor(lv)])].sort((a, b) => a - b) : QUIZ_LENGTHS;
+  $('lenPick').innerHTML = lens.map((len) => {
+    const off = lv ? lenOff(lv, len) : false;
+    return `<button class="qlen" role="radio" data-len="${len}"
+      aria-checked="${String(state.quizLen === len)}"${off ? ' disabled aria-disabled="true"' : ''}>
+      ${len} 題</button>`;
+  }).join('');
+  $('lenPick').querySelectorAll('.qlen').forEach((el) => {
+    el.addEventListener('click', () => selectLen(Number(el.dataset.len)));
+  });
+  // 原因句只在「選了難度、且該卷長不可用」時出現。**不套淡化樣式**（C55／S-4）
+  const reason = lv && lenOff(lv, state.quizLen) ? '' : (lv ? lenOffReasonForOff(lv) : '');
+  $('lenWarn').textContent = reason;
+  show($('lenWarn'), !!reason);
+}
+
+/** 已選難度下，被禁用的那些卷長的原因（可能不只一個，逐條列出） */
+function lenOffReasonForOff(level) {
+  return QUIZ_LENGTHS.filter((len) => lenOff(level, len))
+    .map((len) => lenOffReason(level, len)).filter(Boolean).join('；');
+}
+
+/**
+ * C53.1：選卷長。**禁用格必須是程式化 no-op**（同 C45／D55.1）——
+ * `disabled` 只擋滑鼠，鍵盤與程式呼叫都繞得過去。
+ */
+function selectLen(len) {
+  if (!Number.isInteger(len) || len < MIN_QUIZ_LEN || len > QUIZ_SIZE) return;
+  if (state.level && lenOff(state.level, len)) return;
+  state.quizLen = len;
+  renderLenPicker();
+  if (state.level) refreshStartButton();
+}
+
+/**
+ * C53.1：選定卷長在該級不可用時**自動改選**該級第一個可用的卷長。
+ *
+ * 改選是**可見的**：`renderLenPicker()` 會同步更新 `aria-checked`、
+ * CTA 文字由 `refreshStartButton()` 更新，原因句也會說明為什麼原本那個不能用。
+ */
+function reconcileLen(level) {
+  if (!lenOff(level, state.quizLen)) return;
+  // 改選**最長的**可用卷長，不是第一個——使用者原本選的是 20（預設），
+  // 給他該級撐得起的最長卷才是最接近的替代（院內版可能是 19 而不是 10）
+  const usable = [...lensFor(level)].reverse().find((len) => !lenOff(level, len));
+  if (usable) state.quizLen = usable;
+}
+
+/** C54：按鈕文字必須反映**實際會出的題數**，宣稱與交付不符是本專案第二怕的事 */
+function refreshStartButton() {
+  $('btnStart').disabled = false;
+  $('btnStart').textContent = `開始 ${state.quizLen} 題測驗（${LEVELS[state.level].name}）`;
 }
 
 /**
@@ -1053,10 +1254,11 @@ function selectLevel(id) {
     el.setAttribute('aria-checked', String(el.dataset.level === id));
   });
   show($('levelWarn'), false);
-  $('btnStart').disabled = false;
-  // 院內版可能是短卷（D39）：按鈕上寫 20 題卻只出 11 題，是宣稱與交付不符
-  const n = state.fx ? state.fx.levels[id].quizLen : QUIZ_SIZE;
-  $('btnStart').textContent = `開始 ${n} 題測驗（${LEVELS[id].name}）`;
+  // C53.1：先調和卷長（該級可能出不了目前選的卷長），再畫選擇器與 CTA——
+  // 順序反了會出現「按鈕寫 20 題、選擇器上 20 已被禁用」的瞬間
+  reconcileLen(id);
+  renderLenPicker();
+  refreshStartButton();
 }
 
 /**
@@ -1089,6 +1291,27 @@ function startQuiz() {
     return;
   }
   const level = state.level;
+
+  /**
+   * **兩道守門都在任何狀態改動之前**（C45／D55.1）。
+   *
+   * v5.2 之前 `clearRetryState()` 排在級別守門前面，被擋下時其實已經動過
+   * `state.mode`／`origin`。那在現況下剛好無害（走到這裡 origin 恆為 null），
+   * 但「no-op 成立是因為那次改動剛好是冪等的」不是一個能守住的性質——
+   * A54 要斷言的是**前後全等**，不是「差異剛好看不出來」。
+   */
+  if (levelOff(level)) {
+    $('levelWarn').textContent = `${LEVELS[level].badge}目前不可用：${levelOffReason(level)}。`;
+    show($('levelWarn'));
+    return;
+  }
+  const len = state.quizLen;
+  if (!Number.isInteger(len) || lenOff(level, len)) {
+    $('lenWarn').textContent = `${len} 題目前不可用：${lenOffReason(level, len) || '卷長不在可選範圍'}。`;
+    show($('lenWarn'));
+    return;
+  }
+
   // D31 生命週期：新的一輪正常回合開始前，retry 的殘留一律清乾淨。
   //
   // **這一行目前沒有測試守著**（變異驗證確認：拿掉它，25 條全綠）。
@@ -1099,28 +1322,22 @@ function startQuiz() {
   // 「下一回合的成績卡印上一回合的分數」這條路徑重新打開。
   clearRetryState();
 
-  // C45 的第二道：入口被程式化呼叫時也不得出題
-  if (levelOff(level)) {
-    $('levelWarn').textContent = `${LEVELS[level].badge}目前不可用：${levelOffReason(level)}。`;
-    show($('levelWarn'));
-    return;
-  }
-
   /**
    * D38.3：**probe 成功時產生的那一卷就是這一卷**，按下開始不得重抽。
    *
    * 重抽會讓 D38 的判定作廢——「檢查時可用、按下去失敗」正是那條規定要防的。
    * 只用一次：用掉之後同一 session 的下一回合正常隨機抽（否則每回合都同一份題目）。
    */
-  const probe = state.fx?.levels[level];
+  // D56：**消費的是 `(level, 卷長)` 這一格的產物**，不是這個級別的某一卷。
+  // 取錯格＝出的卷不是被判定為可用的那一卷，D38.2 的判定就白做了
+  const probe = state.fx?.levels[level]?.byLen[len];
   if (probe?.quiz) {
     state.questions = probe.quiz;
     probe.quiz = null;
   } else {
-    const n = state.fx ? probe.quizLen : QUIZ_SIZE;
     try {
       state.questions = drawLeveledQuiz(state.items, {
-        level, n, rng: Math.random,
+        level, n: len, rng: Math.random,
         index: state.index, eligible: eligibleFor(level),
       });
     } catch (e) {
@@ -1160,6 +1377,9 @@ function startQuiz() {
   }
 
   state.quizLevel = level;
+  // 本回合的卷長**在此定版**。結算時讀這裡而不是 `state.quizLen`——
+  // 後者是選擇器的當前值，回到起始頁就會被 `resetLevel()` 改掉
+  state.quizLenUsed = len;
   state.idx = 0;
   state.voided = 0;
   state.nextToken = state.questions.length + 1;
@@ -1938,7 +2158,7 @@ function renderResult({ record }) {
   let fresh = [];
   if (record) {
     try {
-      fresh = writeRecords(state.quizLevel, r.score, streak.length)?.fresh ?? [];
+      fresh = writeRecords(state.quizLevel, state.quizLenUsed, r.score, streak.length)?.fresh ?? [];
     } catch (e) {
       console.warn('[records] 寫入失敗', e);
     }

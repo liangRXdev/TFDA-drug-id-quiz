@@ -15,7 +15,7 @@
  */
 
 import {
-  Level, QUIZ_SIZE, CHOICE_COUNT, DISTRACTOR_COUNT,
+  Level, QUIZ_SIZE, QUIZ_LENGTHS, MIN_QUIZ_LEN, CHOICE_COUNT, DISTRACTOR_COUNT,
   buildIndex, eligibleKeys, drawLeveledQuiz, validateQuizInvariants, makeRng,
 } from './engine.js';
 
@@ -645,8 +645,11 @@ export function classifyFormulary(tokens, { poolIds, excludedStages } = {}) {
 
 // ── D38 級別可用性＝實際組得出卷 ─────────────────────────────────────
 
-/** D38.1：最小卷長。短於此就不值得出（一回合太短，逐題檢討沒有意義） */
-export const MIN_QUIZ_LEN = 10;
+/**
+ * D38.1：最小卷長。定義已移到 `engine.js`（v5.2 起由 `QUIZ_LENGTHS` 導出），
+ * 這裡 re-export 只為保持既有 import 路徑與測試不變。
+ */
+export { MIN_QUIZ_LEN };
 
 /**
  * 該級每題需要的**卷外**誘答鍵數（D38.1）。
@@ -680,11 +683,41 @@ export const quizLenFor = (level, K) => Math.min(QUIZ_SIZE, K - distractorNeed(l
  * 相同 payload ＋ 相同 pool ＋ 相同 level 必須得到相同的可用性判定與**相同的第一卷**。
  * 否則會出現「檢查時可用、按下去失敗」與「重整後按鈕忽隱忽現」。
  */
-export function formularySeed(payload, level) {
+export function formularySeed(payload, level, len) {
   if (typeof payload !== 'string') fail('BAD_PAYLOAD', 'seed 需要 payload 字串');
   distractorNeed(level);                       // 級別值域檢查（未知級別直接拋）
-  return crc32(new TextEncoder().encode(`${payload}|${level}`));
+  // 值域是 `[MIN_QUIZ_LEN, QUIZ_SIZE]` 的整數，不是 `QUIZ_LENGTHS` 的成員——
+  // 院內版的短卷上限是連續值（K=22 的 L1 是 19），那些也要能算 seed
+  if (!Number.isInteger(len) || len < MIN_QUIZ_LEN || len > QUIZ_SIZE) {
+    fail('BAD_QUIZ_LEN', `卷長超出範圍：${JSON.stringify(len)}`);
+  }
+  return crc32(new TextEncoder().encode(`${payload}|${level}|${len}`));
 }
+
+/**
+ * D55／D56：該級在 K 個可出題答案鍵下**可供選擇**的卷長（昇冪、去重）。
+ *
+ * ＝ `QUIZ_LENGTHS` 中不超過上限的那些，**再加上上限本身**。
+ *
+ * **為什麼要加上限**：`quizLenFor` 是連續值（K=22 的 L1 上限是 19），
+ * 而 `QUIZ_LENGTHS` 只有 10 與 20。若只取 `≤ cap` 的標準卷長，
+ * 一份原本能出 19 題的清單會**退化成只能出 10 題**——那是移除既有能力，
+ * 而本輪要做的是「額外提供 10 題」，不是取代 D39 的短卷。
+ *
+ * 非標準卷長（11–19）只會出現在院內版，而**院內版不寫最佳紀錄**（D40），
+ * 所以它不會進到 `byLen` 的紀錄結構裡，D51 的卷長 key 值域不受影響。
+ *
+ * 這只是「算術上允許」的候選集合，**不是可用性判定**——
+ * D38 已經定過調：算術門檻只是便宜的前置拒絕，
+ * 真正的證據是實際組卷成功且 `validateQuizInvariants()` 回空。
+ */
+export const selectableLengths = (level, K) => {
+  const cap = quizLenFor(level, K);
+  if (cap < MIN_QUIZ_LEN) return [];
+  const lens = new Set(QUIZ_LENGTHS.filter((len) => len <= cap));
+  lens.add(cap);
+  return [...lens].sort((a, b) => a - b);
+};
 
 /**
  * 由當前 `pool.json` 與清單 id 集合準備出題子集（D36 ＋ D41）。
@@ -773,19 +806,48 @@ export function probeLevel({ payload, level, items, index }) {
   const eligible = eligibleKeys(idx, level);
   const K = eligible.size;
   const minK = minUsableK(level);
-  const out = { level, K, quizLen: 0, available: false, quiz: null, code: null, reason: null };
+  const selectable = selectableLengths(level, K);
 
-  // 1. 快速前置拒絕（便宜，不必組卷）
+  // **每個卷長各判一次**（D56）。`byLen` 除了可選的那些，也涵蓋全部 `QUIZ_LENGTHS`——
+  // 不可用的標準卷長也要能說出原因（C55），沒有格子就沒有地方掛原因。
+  const byLen = {};
+  for (const len of new Set([...QUIZ_LENGTHS, ...selectable])) {
+    byLen[len] = selectable.includes(len)
+      ? probeLength({ payload, level, len, items, index: idx, eligible })
+      // 算術前置拒絕：品項數就是不夠出這個卷長（C55 的第一種原因）
+      : { len, available: false, quiz: null, code: 'LEN_ABOVE_CAP',
+          reason: `可出題答案鍵 ${K} 個，不足以出 ${len} 題` };
+  }
+
+  // D55：級別可用 ＝ **至少一個**卷長格可用。刻意不是 `every`——
+  // 用 `every` 會讓「10 可用、20 不可用」的級別被整級禁用
+  const available = selectable.some((len) => byLen[len].available);
+  const out = { level, K, minK, cap: quizLenFor(level, K), selectable, byLen, available, code: null, reason: null };
+  if (available) return out;
+
+  // 全部不可用時的 aggregate 原因：K 未達門檻是「品項數不足」，
+  // 否則是「這份清單組不出」——兩者對使用者的下一步完全不同（C55）
   if (K < minK) {
     return { ...out, code: 'K_BELOW_MIN', reason: `可出題答案鍵 ${K} 個，未達最低 ${minK} 個` };
   }
+  const shortest = byLen[MIN_QUIZ_LEN];
+  return { ...out, code: shortest.code, reason: shortest.reason };
+}
 
-  // 2. 真正的證據：以目標卷長實際組卷
-  const n = quizLenFor(level, K);
-  const rng = makeRng(formularySeed(payload, level));
+/**
+ * 單一 `(level, 卷長)` 格的可用性判定（D38.2 的同構延伸）。
+ *
+ * 成功時回傳的 `quiz` **就是使用者選了這個卷長、按下開始後要用的那一卷**（D38.3）。
+ * 不得截斷別格的產物來充當——雖然截斷確實不會破壞任何不變量
+ * （已逐條核對 `validateQuizInvariants`：全部對子集封閉），
+ * 但那樣一來這一格的判定就不是它自己的證據了。
+ */
+function probeLength({ payload, level, len, items, index: idx, eligible }) {
+  const out = { len, available: false, quiz: null, code: null, reason: null };
+  const rng = makeRng(formularySeed(payload, level, len));
   let quiz;
   try {
-    quiz = drawLeveledQuiz(items, { level, n, rng, index: idx, eligible });
+    quiz = drawLeveledQuiz(items, { level, n: len, rng, index: idx, eligible });
   } catch (e) {
     // 組卷在允許的重試次數內仍失敗 → 該級禁用。**不得以重複題或跨子集誘答救場**。
     //
@@ -794,7 +856,7 @@ export function probeLevel({ payload, level, items, index }) {
     // 使用者只看到級別按鈕變灰——那正是本專案最怕的靜默失效。
     // 未知錯誤一律重拋，讓它以真面目炸出來。
     if (!DEGRADABLE_CODES.has(e?.code)) throw e;
-    return { ...out, quizLen: n, code: e.code, reason: DEGRADE_REASON[e.code] };
+    return { ...out, code: e.code, reason: DEGRADE_REASON[e.code] };
   }
   // D38.2 明定「成功**且** validateQuizInvariants() 回空」才算可用，所以這道檢查留著。
   // **誠實標明**：它今天不可能觸發——`drawLeveledQuiz` 內部的 `assertQuizInvariants`
@@ -805,9 +867,9 @@ export function probeLevel({ payload, level, items, index }) {
   const violations = validateQuizInvariants(quiz, { level, index: idx });
   if (violations.length) {
     // 訊息本身含藥名，不可直接給使用者——只回代碼，明細留在 violations
-    return { ...out, quizLen: n, code: 'INVARIANT_VIOLATED', reason: `不變量違規 ${violations.length} 項`, violations };
+    return { ...out, code: 'INVARIANT_VIOLATED', reason: `不變量違規 ${violations.length} 項`, violations };
   }
-  return { ...out, quizLen: n, available: true, quiz };
+  return { ...out, available: true, quiz };
 }
 
 /**

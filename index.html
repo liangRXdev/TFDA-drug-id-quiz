@@ -120,6 +120,20 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .level .lv-meta { font-size: 0.68rem; color: var(--text-muted); }
 .level-warn { font-size: 0.75rem; color: var(--warning); margin: 0.5rem 0 0; }
 
+/* C53 卷長選擇器。刻意比難度卡輕：它是難度之後的第二個決策，
+   同視覺重量會讓兩個 radiogroup 互相競爭注意力（同 V5.1 收合入口的理由）。
+   **44px 觸控目標不因此放寬**——它仍是要用手指按的控制項 */
+.qlen-label { font-size: 0.78rem; color: var(--text-muted); margin: 0.9rem 0 0.35rem; }
+.qlens { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.qlen {
+  min-height: 44px; padding: 0 1.1rem; background: #fff; color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: 6px;
+  font-size: 0.85rem; font-weight: 400;
+}
+.qlen:hover:not(:disabled) { background: var(--accent-light); border-color: var(--accent); }
+.qlen[aria-checked="true"] { border-color: var(--accent); background: var(--accent-light); font-weight: 700; color: var(--accent); }
+.qlen[aria-disabled="true"] { cursor: not-allowed; opacity: 0.55; }
+
 /* 選擇題選項 */
 .options { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 1.1rem; }
 .opt {
@@ -197,6 +211,10 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .records .rec-head { display: flex; align-items: baseline; justify-content: space-between; font-size: 0.75rem; color: var(--text-muted); }
 .rec { margin-top: 0.5rem; }
 .rec .rec-lv { margin-bottom: 0.15rem; }
+/* C56：卷長標籤必須看得見。10 題的 90 分與 20 題的 90 分不是同一件事，
+   把兩組並排而不標明卷長，等於在畫面上重新製造 D51 禁止的比較 */
+.rec-len { margin: 0.3rem 0 0 0.2rem; }
+.rec-len-k { font-size: 0.7rem; color: var(--text-muted); font-weight: 700; }
 .rec-line { display: flex; flex-wrap: wrap; gap: 0.5rem; font-size: 0.72rem; color: var(--text-muted); }
 .rec-line .k { min-width: 4.5rem; }
 .rec-line .v { font-family: var(--mono); color: var(--text-primary); font-weight: 700; }
@@ -421,6 +439,13 @@ input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow:
 
     <div class="levels" id="levelPick" role="radiogroup" aria-label="難度"></div>
     <p class="level-warn hidden" id="levelWarn"></p>
+
+    <!-- C53 卷長。**在難度之後**：真正的 primary CTA 是難度卡，卷長是第二個決策。
+         禁用原因 #lenWarn 與 .lv-off 同屬「使用者判斷要用的訊息」，
+         不得收進 <details>、不得淡化（C55／S-4）。 -->
+    <p class="qlen-label">題數</p>
+    <div class="qlens" id="lenPick" role="radiogroup" aria-label="題數"></div>
+    <p class="level-warn hidden" id="lenWarn"></p>
 
     <div class="btn-row">
       <button id="btnStart" disabled>請先選擇難度</button>

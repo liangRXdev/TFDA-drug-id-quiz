@@ -565,6 +565,8 @@ describe('V5.1 起始頁：收合區的邊界', () => {
     ['levelPick', '難度卡本身，禁用原因 .lv-off 就渲染在裡面'],
     ['levelWarn', '選到禁用級別時的說明'],
     ['recordsNote', '清除紀錄的成敗回饋（清除成功後 recordsBox 會消失，只剩這句）'],
+    ['lenPick', 'V5.2 卷長選擇器：開始之前的第二個決策，收起來就等於沒有這個功能'],
+    ['lenWarn', 'V5.2 卷長禁用原因（C55）：使用者要據此判斷「為什麼 20 題按不了」'],
   ];
   for (const [id, why] of ALWAYS_VISIBLE) {
     test(`#${id} 不得收進 <details>：${why}`, () => {
@@ -595,6 +597,16 @@ describe('V5.1 收合區入口的觸控目標與視覺重量（靜態 CSS 契約
     const mh = /min-height:\s*(\d+)px/.exec(m[1]);
     assert.ok(mh, '.disc > summary 未宣告 min-height');
     assert.ok(Number(mh[1]) >= 44, `.disc > summary 的 min-height 只有 ${mh[1]}px`);
+  });
+
+  test('V5.2 卷長選擇器 .qlen 也有 44px 觸控目標', () => {
+    // 〔堵〕C53 把卷長定位成「難度之後的第二個決策」而刻意做輕——
+    //       視覺可以降權，**可及性不行**（同 summary 的理由）
+    const m = /\.qlen\s*\{([^}]*)\}/.exec(css);
+    assert.ok(m, '缺少 .qlen 的樣式宣告');
+    const mh = /min-height:\s*(\d+)px/.exec(m[1]);
+    assert.ok(mh, '.qlen 未宣告 min-height');
+    assert.ok(Number(mh[1]) >= 44, `.qlen 的 min-height 只有 ${mh[1]}px`);
   });
 
   test('summary 字級小於主要按鈕（不得與 CTA 同視覺重量）', () => {

@@ -215,13 +215,29 @@ class El {
     this._html = v;
     this._children = [];
     this._appended = [];
-    // app.js 只對 .opt / .level / .cell 綁事件；.cell 內含一個 <img>
-    for (const cls of ['opt', 'level', 'cell']) {
+    // app.js 只對 .opt / .level / .cell / .qlen 綁事件；.cell 內含一個 <img>
+    for (const cls of ['opt', 'level', 'cell', 'qlen']) {
       const tags = [...v.matchAll(new RegExp(`<button class="${cls}"[^>]*>`, 'g'))].map((m) => m[0]);
       tags.forEach((t, i) => {
         const c = new El(`${cls}#${i}`, 'button');
         c._cls = cls;
-        c.dataset = { k: attrs(t, 'data-k')[0] ?? String(i), level: attrs(t, 'data-level')[0] };
+        c.dataset = {
+          k: attrs(t, 'data-k')[0] ?? String(i),
+          level: attrs(t, 'data-level')[0],
+          len: attrs(t, 'data-len')[0],
+        };
+        /**
+         * **標籤上的屬性要真的解析出來。**
+         *
+         * `.level` 靠 `resetLevel()` 事後 `setAttribute` 補上，所以早期不解析也看不出問題；
+         * `.qlen` 每次都整塊重畫、沒有那道補丁，不解析就會讓
+         * 「選擇器顯示什麼」變成測不到的東西——而那正是 M9 要堵的弱化。
+         */
+        for (const a of ['aria-checked', 'aria-disabled']) {
+          const av = attrs(t, a)[0];
+          if (av !== undefined) c._attrs[a] = av;
+        }
+        if (/\sdisabled(?=[\s>])/.test(t)) c.disabled = true;
         if (cls === 'cell') {
           const img = new ImgEl(`${cls}#${i}-img`);
           // alt 取自產生的 HTML，C8 要據此斷言可及性樹沒有洩漏外觀特徵
