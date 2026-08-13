@@ -21,7 +21,8 @@ import {
   installDom, ROOT, imgControl, storeControl, urlControl, fetchControl, sinkLog,
 } from './_ui-harness.mjs';
 import {
-  Level, QUIZ_SIZE, DECK_SIZE, makeRng, buildIndex, eligibleKeys, drawLeveledQuiz, drawDeck,
+  Level, QUIZ_SIZE, QUIZ_LENGTHS, DECK_SIZE, makeRng, buildIndex, eligibleKeys,
+  drawLeveledQuiz, drawDeck,
 } from '../engine.js';
 import {
   encodeFormulary, prepareFormulary, probeLevel, Category, CATEGORY_LABEL,
@@ -58,10 +59,21 @@ const drawLeveledQuizForTest = (seed, index) => drawLeveledQuiz(POOL.items, {
   index, eligible: eligibleKeys(index, Level.L1),
 });
 
-/** 測試自己算出來的 probe 結果——**不是**從受測 app 讀回來的 */
+/**
+ * 測試自己算出來的 probe 結果——**不是**從受測 app 讀回來的。
+ *
+ * v5.2：probe 依 `level × 卷長` 分格（D56）。這裡另外**獨立重算**「UI 會選中哪一格」
+ * ——預設 20，不可用時自動改選第一個可用的（C53.1 的 `reconcileLen`）——
+ * 並把該格攤平成 `quiz`／`quizLen`，讓既有斷言仍然針對「使用者實際會拿到的那一卷」。
+ * 刻意不從 app 讀這個選擇：期望值由受測程式產生就什麼都證明不了。
+ */
 function expectProbe(payload, level, ids, items = POOL.items) {
   const prep = prepareFormulary(items, new Set(ids));
-  return probeLevel({ payload, level, items: prep.items, index: prep.index });
+  const p = probeLevel({ payload, level, items: prep.items, index: prep.index });
+  const len = p.byLen[QUIZ_SIZE]?.available
+    ? QUIZ_SIZE
+    : [...p.selectable].reverse().find((l) => p.byLen[l]?.available);
+  return { ...p, len: len ?? 0, quizLen: len ?? 0, quiz: len ? p.byLen[len].quiz : null };
 }
 
 let bootN = 0;
@@ -656,9 +668,13 @@ describe('C45 禁用級別是「可見且程式化 no-op」', () => {
    * 弱化實作可以只對 L2 套 `levelOff()`，L1／L3 照樣讓人按下去。
    *
    * 三份 fixture 各自讓不同的級別撐不起來（實測值，K 與失敗代碼在測試內自檢）：
-   * 16 品項 → L1 組不出卷、L3 還行；30 品項 → L2 湊不到同形同色誘答；9 品項 → 三級全禁。
+   * 12 品項 → L1 的 K=12 未達 13、L3 還行；30 品項 → L2 湊不到同形同色誘答；9 品項 → 三級全禁。
+   *
+   * **L1 的 fixture 由 16 改為 12（v5.2）**：16 品項時 L1 的 K=16，出 20 題要 K≥23、
+   * 出 10 題只要 K≥13——所以它現在是「10 題可用、20 題不可用」，整級不再禁用。
+   * 這不是測試被改綠，是卷長選項的預期效果；那組 fixture 移去 A66 驗混合格。
    */
-  for (const [level, n, seed] of [[Level.L1, 16, 4501], [Level.L2, 30, 4545], [Level.L3, 9, 4503]]) {
+  for (const [level, n, seed] of [[Level.L1, 12, 4501], [Level.L2, 30, 4545], [Level.L3, 9, 4503]]) {
     test(`${level} 不可用時：狀態與原因都在，且程式化呼叫零副作用`, async () => {
       needPool();
       const ids = pickIds(n, seed);
@@ -1671,6 +1687,263 @@ describe('樁本身的守備力（依 codex-review TG-6／TG-7）', () => {
 });
 
 // ════════════════════════════════════════════════════════════════════
+// V5.2 卷長選項的院內版驗收（A54／A56／A63／A66／A67）
+// ════════════════════════════════════════════════════════════════════
+
+const lenBtn = (dom, len) =>
+  dom.$('lenPick').querySelectorAll('.qlen').find((b) => Number(b.dataset.len) === len);
+
+/**
+ * 題卷的完整 identity（A56／判定 V-1）。
+ *
+ * **不能只比 token 集合**：`engine.js` 的 `token: i + 1` 讓任意兩份同長度題卷的
+ * token 集合恆等於 `{1..n}`，那個斷言證明不了任何事。逐題比對正解、
+ * 全部選項、全部備援的**紀錄 id**，才鎖得住「這一卷就是那一卷」。
+ */
+const quizFingerprint = (quiz) => quiz.map((q) => [
+  q.token,
+  q.item.id,
+  (q.options ?? []).map((o) => o.id).join(','),
+  (q.spares ?? []).map((s) => s.id).join(','),
+].join('|'));
+
+describe('A66 D55 aggregate：一格可用、一格不可用時，級別仍然可用', () => {
+  /**
+   * 〔堵〕aggregate 用 `every` 或只看 20 題格——「10 題可用、20 題不可用」的級別
+   *       會被整級禁用，連帶讓 D41 的「三級全禁用」判斷跟著錯（判定 R-5）。
+   *
+   * fixture：16 品項的 L1，K=16。出 10 題要 K≥13（過），出 20 題要 K≥23（不過）。
+   * 這組 fixture 在 v5.1 是「L1 整級不可用」，卷長選項讓它變成「只能出 10 題」——
+   * 那正是本功能要帶來的效果。
+   */
+  test('L1 K=16：10 題可用、20 題不可用，級別本身仍可用且可出卷', async () => {
+    needPool();
+    const ids = pickIds(16, 4501);
+    const payload = payloadOf(ids);
+    const p = expectProbe(payload, Level.L1, ids);
+
+    assert.equal(p.byLen[10].available, true, 'fixture 必須讓 10 題可用');
+    assert.equal(p.byLen[QUIZ_SIZE].available, false, 'fixture 必須讓 20 題不可用');
+    assert.equal(p.available, true, 'aggregate 用了 every——一格不可用就把整級禁掉了');
+
+    const dom = await boot({ saved: savedJson(payload) });
+    const card = cardFor(dom, Level.L1);
+    assert.equal(card.disabled, false, '級別不該被禁用');
+
+    card.click();
+    // C53.1：預設的 20 不可用 → 自動改選 10，且改選必須是可見的
+    assert.equal(lenBtn(dom, QUIZ_SIZE).disabled, true, '20 題選項應為 disabled');
+    assert.equal(lenBtn(dom, 10).getAttribute('aria-checked'), 'true', '未自動改選到 10');
+    assert.match(dom.$('btnStart').textContent, /開始 10 題測驗/, 'CTA 未跟著改');
+    assert.equal(dom.$('btnStart').disabled, false);
+
+    dom.$('btnStart').click();
+    await dom.settle();
+    assert.ok(!dom.hidden('quiz'), '應該出得了卷');
+    assert.equal(Number(dom.$('qTotal').textContent), 10);
+  });
+
+  test('A67 每一個被禁用的卷長都要有原因——含非標準卷長（人工留檔發現）', async () => {
+    /**
+     * 〔堵〕原因句只掃 `QUIZ_LENGTHS`。院內版的選擇器會多畫一個該級上限
+     *       （這份 fixture 是 13），它同樣可能被禁用——只掃標準卷長會讓那顆按鈕
+     *       變灰卻沒有任何解釋。**單元測試與靜態契約都沒抓到，是人工瀏覽器留檔抓到的。**
+     */
+    needPool();
+    const ids = pickIds(16, 4501);
+    const payload = payloadOf(ids);
+    const p = expectProbe(payload, Level.L1, ids);
+    // fixture 自檢：必須真的有一個「非標準卷長且被禁用」的格
+    assert.deepEqual(p.selectable, [10, 13], 'fixture 的可選卷長變了，這條就驗不到東西');
+    assert.equal(p.byLen[13].available, false, 'fixture 的 13 題格必須是不可用的');
+    assert.equal(p.byLen[13].code, 'QUIZ_ASSEMBLY_FAILED');
+
+    const dom = await boot({ saved: savedJson(payload) });
+    cardFor(dom, Level.L1).click();
+    const shown = [...dom.$('lenPick').querySelectorAll('.qlen')].map((b) => Number(b.dataset.len));
+    assert.deepEqual(shown, [10, 13, 20], '選擇器沒畫出該級的非標準卷長');
+
+    const warn = dom.$('lenWarn').textContent;
+    for (const len of [13, 20]) {
+      assert.ok(warn.includes(String(len)),
+        `${len} 題被禁用卻沒有原因（C55）：${warn}`);
+    }
+    // 13 是組卷失敗、20 是品項數不足——兩種原因的措辭必須不同
+    assert.match(warn, /組不出 13 題/, '組卷失敗被說成品項數不足');
+    assert.match(warn, /不足以出 20 題/, '算術前置拒絕沒有說品項數不足');
+  });
+
+  test('A67 C55 的原因必須分辨「品項數不足」與「這份清單組不出」', async () => {
+    needPool();
+    const ids = pickIds(16, 4501);
+    const dom = await boot({ saved: savedJson(payloadOf(ids)) });
+    cardFor(dom, Level.L1).click();
+    // 原因是多條合併（13 與 20 各一句），**必須逐句檢查**——
+    // 對整串做 `!/組不出/` 只證明「沒有任何一句提到組不出」，
+    // 而正確的畫面本來就該有一句提到（13 題那句）
+    const parts = dom.$('lenWarn').textContent.split('；');
+    const of = (len) => parts.find((s) => s.includes(`${len} 題`));
+
+    const p20 = of(20);
+    assert.ok(p20, '20 題沒有原因句');
+    assert.match(p20, /不足以出/, `20 題是算術前置拒絕，應說品項數不足：${p20}`);
+    // 〔堵〕兩種原因共用一句「品項數不足」——使用者加了品項仍撞同一面牆
+    assert.ok(!/組不出/.test(p20), `算術前置拒絕不該說成「組不出」：${p20}`);
+
+    const p13 = of(13);
+    assert.ok(p13, '13 題沒有原因句');
+    assert.match(p13, /組不出/, `13 題是實際組卷失敗，不該歸因於品項數：${p13}`);
+    assert.ok(!/不足以出/.test(p13), `組卷失敗不該說成品項數不足：${p13}`);
+  });
+});
+
+describe('A56 probe 產物的消費：identity 要逐題鎖住，不是比 token 集合', () => {
+  /**
+   * 〔堵〕(a) 記一個「有消費 probe」的旗標；
+   *       (b) 消費**錯格**（拿 20 題格的產物出 10 題卷，或拿別級的）；
+   *       (c) 用 token 集合當 identity——`token: i + 1` 讓它恆等（判定 V-1）。
+   */
+  test('選 10 題時消費的是 10 題格的產物，且開始後零組卷、零 RNG', async () => {
+    needPool();
+    const ids = pickIds(60, 4601);
+    const payload = payloadOf(ids);
+    const prep = prepareFormulary(POOL.items, new Set(ids));
+    const p = probeLevel({ payload, level: Level.L1, items: prep.items, index: prep.index });
+    assert.equal(p.byLen[10].available, true, 'fixture 的 10 題格必須可用');
+    assert.equal(p.byLen[QUIZ_SIZE].available, true, 'fixture 的 20 題格也要可用（才驗得到取錯格）');
+
+    const want10 = quizFingerprint(p.byLen[10].quiz);
+    const want20 = quizFingerprint(p.byLen[QUIZ_SIZE].quiz);
+    assert.notDeepEqual(want10, want20.slice(0, 10),
+      '兩格的前 10 題若相同，這條就分不出「消費 10 題格」與「截斷 20 題格」');
+
+    const dom = await boot({ saved: savedJson(payload) });
+    cardFor(dom, Level.L1).click();
+    lenBtn(dom, 10).click();
+
+    // 開始之後不得再有任何隨機消耗——probe 產物就是這一卷（D38.3／C52）
+    let rngCalls = 0;
+    const real = Math.random;
+    Math.random = () => { rngCalls++; return real(); };
+    try {
+      dom.$('btnStart').click();
+      await dom.settle();
+    } finally { Math.random = real; }
+    assert.equal(rngCalls, 0, '按下開始後動用了 Math.random——重抽了');
+
+    // 逐題比對畫面上的選項與 probe 產物（identity，不是集合）
+    assert.equal(Number(dom.$('qTotal').textContent), 10);
+    const shown = optionNames(dom);
+    const firstOpts = p.byLen[10].quiz[0].options.map((o) => o.ans);
+    assert.deepEqual([...shown].sort(), [...firstOpts].sort(),
+      '第一題的選項不是 10 題格 probe 產物的選項');
+    const first20 = p.byLen[QUIZ_SIZE].quiz[0].options.map((o) => o.ans);
+    assert.notDeepEqual([...shown].sort(), [...first20].sort(),
+      '消費到 20 題格的產物了');
+  });
+});
+
+describe('A63 院內版不寫最佳紀錄（D40 > D50）', () => {
+  /**
+   * 〔堵〕**sentinel 選錯會讓變異假死**（判定 V-2）：若預置 100 分／20 連對，
+   * 移除 `!state.fx` 守門後院內全對卷也破不了紀錄，records 確實不變，M7 不會轉紅。
+   * 這裡一律用「保證會被打破」的 sentinel。
+   */
+  for (const len of [10, QUIZ_SIZE]) {
+    test(`${len} 題全對卷跑完，records key 內容與 mutation 都不變`, async () => {
+      needPool();
+      const ids = pickIds(60, 4602);
+      const payload = payloadOf(ids);
+      const p = expectProbe(payload, Level.L1, ids);
+      assert.equal(p.byLen[len].available, true, `fixture 的 ${len} 題格必須可用`);
+
+      // 保證會被打破的 sentinel：0 分／0 連對。全對卷必定超越它
+      const sentinel = JSON.stringify({
+        schema: 1,
+        L1: { bestScore: { value: 0, date: '2026-01-01', pool: '000000000000' },
+              bestStreak: { value: 0, date: '2026-01-01', pool: '000000000000' } },
+      });
+      const dom = await boot({ saved: savedJson(payload), records: sentinel });
+      const beforeRaw = storeControl.map.get(REC_KEY);
+      const beforeMut = storeControl.mutations().length;
+
+      cardFor(dom, Level.L1).click();
+      lenBtn(dom, len).click();
+      dom.$('btnStart').click();
+      await dom.settle();
+      playAllCorrect(dom, p.byLen[len].quiz);
+      await dom.settle();
+
+      assert.ok(!dom.hidden('result'), '未走到結算頁——這條就沒驗到寫入路徑');
+      assert.equal(storeControl.map.get(REC_KEY), beforeRaw, '院內版寫了最佳紀錄（D40）');
+      assert.equal(storeControl.mutations().length, beforeMut, 'records 有 mutation');
+      assert.ok(dom.hidden('recordFlash'), '院內版不該顯示「新紀錄！」');
+    });
+  }
+});
+
+describe('A54 卷長守門是程式化 no-op（D55.1）', () => {
+  /**
+   * **這裡驗的是第一道守門（`selectLen`）。**
+   *
+   * `startQuiz()` 內的第二道守門是縱深防禦，**現況沒有測試走得到**：
+   * `selectLen` 已經擋住不可用的卷長，`state.quizLen` 因此永遠停在可用值，
+   * 按下開始只會出那個可用卷長的卷。這與 `clearRetryState()` 的處境相同
+   * （見 app.js 內該行的註解）——留著是因為 D55.1 把「程式化呼叫不得出卷」
+   * 列為硬性條件，靠兩處各自守住，少任何一處那條路徑就重新打開。
+   * **不假裝這條測到了它。**
+   */
+  test('程式化點擊被禁用的 20 題 → 選取不變、CTA 不變，且零副作用', async () => {
+    needPool();
+    const ids = pickIds(16, 4501);            // L1：10 題可用、20 題不可用
+    const payload = payloadOf(ids);
+    const dom = await boot({ saved: savedJson(payload) });
+    cardFor(dom, Level.L1).click();
+
+    const snap = {
+      store: JSON.stringify([...storeControl.map]),
+      mut: storeControl.mutations().length,
+      loaded: imgControl.loaded.length,
+      quizHidden: dom.hidden('quiz'),
+      checked: lenBtn(dom, 10).getAttribute('aria-checked'),
+      cta: dom.$('btnStart').textContent,
+    };
+    let rngCalls = 0;
+    const real = Math.random;
+    Math.random = () => { rngCalls++; return real(); };
+    try {
+      lenBtn(dom, QUIZ_SIZE).click();         // 樁的 click 不看 disabled ＝ 程式化呼叫
+      await dom.settle();
+    } finally { Math.random = real; }
+
+    assert.equal(lenBtn(dom, 10).getAttribute('aria-checked'), snap.checked,
+      '被禁用的卷長改動了選取狀態');
+    assert.equal(lenBtn(dom, QUIZ_SIZE).getAttribute('aria-checked'), 'false',
+      '禁用的卷長被選起來了');
+    assert.equal(dom.$('btnStart').textContent, snap.cta, 'CTA 被改成不可用的卷長');
+    assert.equal(dom.hidden('quiz'), snap.quizHidden);
+    assert.equal(JSON.stringify([...storeControl.map]), snap.store, 'storage 被改動');
+    assert.equal(storeControl.mutations().length, snap.mut);
+    assert.equal(imgControl.loaded.length, snap.loaded, '偷偷啟動了預載');
+    assert.equal(rngCalls, 0, '動用了 RNG');
+  });
+
+  test('接著按下開始：出的仍是可用的 10 題卷，不是被擋下的 20 題', async () => {
+    // 〔堵〕M9：選擇器顯示 10、實際抽 20。這條把「畫面說的」與「引擎收到的」綁在一起
+    needPool();
+    const ids = pickIds(16, 4501);
+    const dom = await boot({ saved: savedJson(payloadOf(ids)) });
+    cardFor(dom, Level.L1).click();
+    lenBtn(dom, QUIZ_SIZE).click();           // 被擋下
+    dom.$('btnStart').click();
+    await dom.settle();
+    assert.ok(!dom.hidden('quiz'));
+    assert.equal(Number(dom.$('qTotal').textContent), 10,
+      '出了一卷不是使用者（也不是畫面）所指定的卷長');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════
 describe('DOM 掛點確實存在於 index.html（樁會自動生元素，這條防它）', () => {
   const IDS = [
     'btnFormulary', 'formulary', 'fxInput', 'fxDelim', 'fxColumn', 'fxHeader',
@@ -1680,6 +1953,7 @@ describe('DOM 掛點確實存在於 index.html（樁會自動生元素，這條�
     'qFxNote', 'qFxN', 'qFxK', 'qFxUnlisted',
     'resultFxNote', 'rFxN', 'rFxK', 'rFxUnlisted',
     'btnFxExit', 'fxExitConfirm', 'btnFxExitYes', 'btnFxExitNo', 'fxListLegend',
+    'lenPick', 'lenWarn',
   ];
   for (const id of IDS) {
     test(`#${id} 在 index.html 內`, () => {

@@ -138,7 +138,32 @@ export function makeHint(answerKey) {
 
 // ── 抽題 ──────────────────────────────────────────────────────────────
 
+/**
+ * 最長／預設卷長（v5.2 起語意由「唯一卷長」改為此）。
+ *
+ * 名稱刻意不改：`formulary.js` 的 `quizLenFor`、規格文件與既有測試大量引用它，
+ * 改名的收益只有命名精確，代價是一次跨檔案的機械式改動。
+ */
 export const QUIZ_SIZE = 20;
+
+/**
+ * D50／C53：使用者可選的卷長。**要新增 5 或 30 題只改這個陣列**。
+ *
+ * 昇冪排列是契約的一部分——UI 依此順序畫選擇器，
+ * `MIN_QUIZ_LEN` 也由它導出，兩者不得各自維護一份順序或最小值。
+ */
+export const QUIZ_LENGTHS = [10, 20];
+
+/** C53：未選擇時的預設卷長 */
+export const DEFAULT_QUIZ_LEN = QUIZ_SIZE;
+
+/**
+ * D38.1：最小卷長。短於此就不值得出（一回合太短，逐題檢討沒有意義）。
+ *
+ * v5.2 起由 `QUIZ_LENGTHS` 導出而非各自寫死——它本來就是卷長域的性質。
+ * 原定義在 `formulary.js`，該檔改為 re-export（既有 import 路徑不變）。
+ */
+export const MIN_QUIZ_LEN = Math.min(...QUIZ_LENGTHS);
 
 /** 可重現的 PRNG（mulberry32）。固定 seed 讓抽題測試不會偶發紅燈。 */
 export function makeRng(seed) {
@@ -941,7 +966,16 @@ export function displayZh(zh) {
 
 // ── 快速閃卡（不計分）─────────────────────────────────────────────────
 
-export const DECK_SIZE = QUIZ_SIZE;
+/**
+ * 閃卡張數。**獨立 literal，刻意不寫成 `QUIZ_SIZE` 的別名**（D54）。
+ *
+ * v5.2 之前兩者是別名，於是任何人改測驗卷長都會連帶改掉閃卡張數——
+ * 那從來不是設計意圖。閃卡是無計分的瀏覽模式，與測驗卷長沒有關係。
+ *
+ * **這是靜態重構**：本輪 `QUIZ_SIZE` 仍是 20，執行期行為完全沒有差異，
+ * 因此不存在能證明此改動的行為測試（A60 只是 source-shape 契約）。
+ */
+export const DECK_SIZE = 20;
 
 /**
  * 外觀重複組索引：外觀鍵 → 該外觀底下所有相異答案鍵。

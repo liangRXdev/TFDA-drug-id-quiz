@@ -24,11 +24,11 @@ import {
   normalizeLicense, tokenize, encodeFormulary, decodeFormulary, crc32,
   FormularyError,
   Category, CATEGORY_LABEL, classifyFormulary, buildExcludedIndex, validatePair,
-  MIN_QUIZ_LEN, distractorNeed, minUsableK, quizLenFor, formularySeed,
+  MIN_QUIZ_LEN, distractorNeed, minUsableK, quizLenFor, formularySeed, selectableLengths,
   prepareFormulary, probeLevel, probeFormulary, splitMissing,
 } from '../formulary.js';
 import {
-  Level, QUIZ_SIZE, buildIndex, eligibleKeys, nameCollides, makeRng, validateQuizInvariants,
+  Level, QUIZ_SIZE, QUIZ_LENGTHS, buildIndex, eligibleKeys, nameCollides, makeRng, validateQuizInvariants,
   buildChoices,
 } from '../engine.js';
 import { COLLISION_GROUPS, PREFIX_SAMPLES } from './_license-fixtures.mjs';
@@ -560,6 +560,13 @@ const mkItems = (level, count, opts) =>
   (level === Level.L2 ? mkL2Items(count, opts) : mkDisjointItems(count, opts));
 
 /** 題卷的穩定 identity：逐題的正解／選項／備援 id 序列 */
+/**
+ * v5.2：probe 依 `level × 卷長` 分格（D56）。既有斷言講的都是「該級最長的那一卷」，
+ * 也就是 D38.1 的 `cap`（`min(20, K − need)`）——取它以保留原本的驗證意圖。
+ * **短卷格（10 題）另由 A66／A68 專門驗**，不在這裡混進來。
+ */
+const capQuiz = (r) => r.byLen?.[r.cap]?.quiz ?? null;
+
 const quizIdentity = (quiz) => quiz.map((q) => [
   q.item.id,
   (q.options || []).map((o) => o.id).join(','),
@@ -624,12 +631,12 @@ describe('A41 出題品項封閉於子集（防 vacuous pass）', () => {
 
       // 先證明卷是真的組出來的——空卷的聯集是空集合，自然是子集
       assert.equal(r.available, true, `${level} 應可用`);
-      assert.equal(r.quiz.length, QUIZ_SIZE, `${level} 卷長應為 20`);
+      assert.equal(capQuiz(r).length, QUIZ_SIZE, `${level} 卷長應為 20`);
       // 不讀實作自己回報的 violations（那是受測程式產生的期望值）——
       // 以測試自己重建的子集 index 獨立驗一次
-      assert.deepEqual(validateQuizInvariants(r.quiz, { level, index: buildIndex(base) }), []);
+      assert.deepEqual(validateQuizInvariants(capQuiz(r), { level, index: buildIndex(base) }), []);
 
-      const used = allQuizIds(r.quiz);
+      const used = allQuizIds(capQuiz(r));
       assert.ok(used.size > 0);
       for (const id of used) {
         assert.ok(matchedIds.has(id), `${level} 出現子集外的品項：${id}`);
@@ -638,7 +645,7 @@ describe('A41 出題品項封閉於子集（防 vacuous pass）', () => {
         assert.ok(!used.has(s.id), `${level} 洩漏了全庫品項 ${s.id}`);
       }
       // 逐題也要驗（不是只看聯集）：正解、全部選項、全部備援
-      for (const q of r.quiz) {
+      for (const q of capQuiz(r)) {
         assert.ok(matchedIds.has(q.item.id));
         for (const o of q.options || []) assert.ok(matchedIds.has(o.id));
         for (const sp of q.spares || []) assert.ok(matchedIds.has(sp.id));
@@ -705,8 +712,8 @@ describe('A41 出題品項封閉於子集（防 vacuous pass）', () => {
     for (const level of [Level.L1, Level.L2, Level.L3]) {
       const lr = r.levels[level];
       assert.equal(lr.available, true, `${level} 在 300 品項子集應可用（K=${lr.K}）`);
-      assert.equal(lr.quiz.length, QUIZ_SIZE);
-      for (const id of allQuizIds(lr.quiz)) {
+      assert.equal(capQuiz(lr).length, QUIZ_SIZE);
+      for (const id of allQuizIds(capQuiz(lr))) {
         assert.ok(matchedIds.has(id), `${level} 洩漏了子集外的 ${id}`);
       }
     }
@@ -749,18 +756,18 @@ describe('A42 可用性判定：級別特定邊界＋真的組得出卷＋可重
         if (expectLen === null) {
           assert.equal(r.available, false);
           assert.equal(r.code, 'K_BELOW_MIN');
-          assert.equal(r.quiz, null);
+          assert.equal(capQuiz(r), null);
           return;
         }
         // 標記為可用者**都必須實際組卷成功並通過 invariants**
         assert.equal(r.available, true, `應可用但被判 ${r.code}：${r.reason}`);
-        assert.equal(r.quizLen, expectLen);
-        assert.equal(r.quiz.length, expectLen);
+        assert.equal(r.cap, expectLen);
+        assert.equal(capQuiz(r).length, expectLen);
         // 不讀實作自己回報的 violations（那是受測程式產生的期望值）——
         // 以測試自己重建的子集 index 獨立驗一次
-        assert.deepEqual(validateQuizInvariants(r.quiz, { level, index: buildIndex(items) }), []);
+        assert.deepEqual(validateQuizInvariants(capQuiz(r), { level, index: buildIndex(items) }), []);
         const ids = new Set(items.map((it) => it.id));
-        for (const id of allQuizIds(r.quiz)) assert.ok(ids.has(id));
+        for (const id of allQuizIds(capQuiz(r))) assert.ok(ids.has(id));
       });
     }
   }
@@ -793,8 +800,8 @@ describe('A42 可用性判定：級別特定邊界＋真的組得出卷＋可重
       const r = probeLevel({ payload, level: Level.L1, items, index });
       assert.equal(r.available, false, `payload=${payload} 竟判為可用`);
       assert.equal(r.code, 'QUIZ_ASSEMBLY_FAILED');
-      assert.equal(r.quiz, null);
-      assert.equal(r.quizLen, 10, '仍要如實回報它嘗試的目標卷長');
+      assert.equal(capQuiz(r), null);
+      assert.equal(r.cap, 10, '仍要如實回報它嘗試的目標卷長');
     }
   });
 
@@ -822,8 +829,8 @@ describe('A42 可用性判定：級別特定邊界＋真的組得出卷＋可重
         const r = probeLevel({ payload, level, items });
         assert.equal(r.available, first.available);
         assert.equal(r.K, first.K);
-        assert.equal(r.quizLen, first.quizLen);
-        assert.deepEqual(quizIdentity(r.quiz), quizIdentity(first.quiz),
+        assert.equal(r.cap, first.cap);
+        assert.deepEqual(quizIdentity(capQuiz(r)), quizIdentity(capQuiz(first)),
           '同一 payload 必須得到相同的第一卷，否則會「檢查時可用、按下去失敗」');
       }
     });
@@ -840,16 +847,38 @@ describe('A42 可用性判定：級別特定邊界＋真的組得出卷＋可重
         Math.random = () => { throw new Error('probe 不得呼叫 Math.random'); };
         const c = probeLevel({ payload, level, items });
         assert.equal(a.available, true);
-        assert.deepEqual(quizIdentity(b.quiz), quizIdentity(a.quiz));
-        assert.deepEqual(quizIdentity(c.quiz), quizIdentity(a.quiz));
+        assert.deepEqual(quizIdentity(capQuiz(b)), quizIdentity(capQuiz(a)));
+        assert.deepEqual(quizIdentity(capQuiz(c)), quizIdentity(capQuiz(a)));
       } finally { Math.random = before; }
     });
   }
 
   test('D38.3 三級的 seed 互不相同（否則三級抽出同一組題）', () => {
     const payload = payloadOf(mkDisjointItems(30));
-    const seeds = [Level.L1, Level.L2, Level.L3].map((lv) => formularySeed(payload, lv));
+    const seeds = [Level.L1, Level.L2, Level.L3].map((lv) => formularySeed(payload, lv, QUIZ_SIZE));
     assert.equal(new Set(seeds).size, 3);
+  });
+
+  test('D56 同級不同卷長的 seed 也必須不同（否則 10 與 20 抽出同一組題）', () => {
+    // 〔堵〕seed 協定沒把卷長算進去——兩個卷長共用同一條 RNG stream，
+    //       10 題卷就會是 20 題卷的前綴，而那正是 D56 不採「截斷」的理由所在
+    const payload = payloadOf(mkDisjointItems(30));
+    for (const lv of [Level.L1, Level.L2, Level.L3]) {
+      const seeds = QUIZ_LENGTHS.map((len) => formularySeed(payload, lv, len));
+      assert.equal(new Set(seeds).size, QUIZ_LENGTHS.length, `${lv} 的兩個卷長拿到同一個 seed`);
+    }
+  });
+
+  test('D56 seed 的卷長值域：非整數／超出 [10,20] 一律拋，不得靜默當成預設', () => {
+    const payload = payloadOf(mkDisjointItems(30));
+    for (const bad of [undefined, null, '10', 9, 21, 10.5, NaN]) {
+      assert.throws(() => formularySeed(payload, Level.L1, bad), /BAD_QUIZ_LEN|卷長/,
+        `卷長 ${JSON.stringify(bad)} 應被拒絕`);
+    }
+    // 合法邊界必須通過（否則「全部拒絕」也能讓上面那條綠）
+    assert.equal(typeof formularySeed(payload, Level.L1, 10), 'number');
+    assert.equal(typeof formularySeed(payload, Level.L1, 20), 'number');
+    assert.equal(typeof formularySeed(payload, Level.L1, 19), 'number');
   });
 
   test('D38.3 子集排序：輸入順序不得影響判定與第一卷', () => {
@@ -870,7 +899,7 @@ describe('A42 可用性判定：級別特定邊界＋真的組得出卷＋可重
       assert.equal(b.levels[lv].code, a.levels[lv].code);
       assert.equal(b.levels[lv].K, a.levels[lv].K);
       if (a.levels[lv].available) {
-        assert.deepEqual(quizIdentity(b.levels[lv].quiz), quizIdentity(a.levels[lv].quiz));
+        assert.deepEqual(quizIdentity(capQuiz(b.levels[lv])), quizIdentity(capQuiz(a.levels[lv])));
       }
     }
   });
@@ -968,13 +997,13 @@ describe('A43 短卷的完整封閉性（級別特定）', () => {
 
       const r = probeLevel({ payload: payloadOf(items), level, items, index });
       assert.equal(r.available, true, `應可用但被判 ${r.code}`);
-      assert.equal(r.quiz.length, len);
+      assert.equal(capQuiz(r).length, len);
       // 不讀實作自己回報的 violations（那是受測程式產生的期望值）——
       // 以測試自己重建的子集 index 獨立驗一次
-      assert.deepEqual(validateQuizInvariants(r.quiz, { level, index: buildIndex(items) }), []);
+      assert.deepEqual(validateQuizInvariants(capQuiz(r), { level, index: buildIndex(items) }), []);
 
       const keys = new Set(items.map((it) => it.ans));
-      const corrects = new Set(r.quiz.map((q) => q.item.ans));
+      const corrects = new Set(capQuiz(r).map((q) => q.item.ans));
       assert.equal(corrects.size, len);
       for (const k of corrects) assert.ok(keys.has(k));
       if (proper) {
@@ -986,7 +1015,7 @@ describe('A43 短卷的完整封閉性（級別特定）', () => {
       }
 
       const ids = new Set(items.map((it) => it.id));
-      for (const q of r.quiz) {
+      for (const q of capQuiz(r)) {
         for (const o of q.options || []) assert.ok(ids.has(o.id), `選項 ${o.id} 不在子集`);
         for (const s of q.spares || []) assert.ok(ids.has(s.id), `備援 ${s.id} 不在子集`);
       }
