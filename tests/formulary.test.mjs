@@ -1151,8 +1151,20 @@ describe('A44 四分類逐 stage 精確 membership', () => {
     for (let i = 1; i < order.length; i++) {
       expect[order[i].slice(0, 2)] = POOL.meta.stages[order[i - 1]] - POOL.meta.stages[order[i]];
     }
-    assert.deepEqual(expect, { Q1: 572, Q2: 1, Q3: 8, Q4: 1603, Q5: 170 },
-      'D37 表格的筆數與 pool.meta.stages 對不上');
+    // 期望值**不得**寫死成某一版資料的快照：上游 TFDA 資料集每月更新，
+    // 淘汰數必然跟著變，而那不是回歸（2026-09-01 排程就這樣紅了一條）。
+    // 這裡改成驗「這組差值本身站得住腳」，真正的契約是下面逐 stage 的比對。
+    assert.deepEqual(Object.keys(expect), ['Q1', 'Q2', 'Q3', 'Q4', 'Q5'],
+      'meta.stages 的階段名稱變了，下面的比對會對不到欄位');
+    for (const [q, n] of Object.entries(expect)) {
+      assert.ok(Number.isInteger(n) && n >= 0, `${q} 的淘汰數不是非負整數：${n}`);
+    }
+    // 〔堵〕差值全為 0（或 meta.stages 退化）時，逐 stage 比對會變成
+    //       「空陣列 === 0」而全綠。總數對上 excluded.json 的筆數才擋得住
+    const total = Object.values(expect).reduce((a, b) => a + b, 0);
+    assert.ok(total > 0, '五個階段一筆都沒淘汰——這組期望值驗不到東西');
+    assert.equal(total, EXCLUDED.items.length,
+      '淘汰數總和與 excluded.json 的筆數對不上（管線兩個輸出互相矛盾）');
 
     const stages = buildExcludedIndex(POOL, EXCLUDED);
     const poolIds = new Set(POOL.items.map((it) => it.id));

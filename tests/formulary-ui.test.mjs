@@ -40,7 +40,14 @@ const REC_KEY = 'tfda-drug-id-quiz:records';
 const REAL_RANDOM = Math.random;
 after(() => { Math.random = REAL_RANDOM; });
 
-/** 決定性子集：以固定 seed 從真實 pool 抽 n 筆（與 A41 同一手法） */
+/**
+ * 決定性子集：以固定 seed 從真實 pool 抽 n 筆（與 A41 同一手法）。
+ *
+ * **只適用於「夠大就好」的子集**（本檔一律 n=300）：斷言是 N 等於清單長度、
+ * 選項落在子集內之類，與抽到哪些品項無關。
+ * 若斷言依賴子集的**組成**（K 值、某卷長可不可用、某級別撐不撐得起來），
+ * 一律改用下面的凍結 fixture——見 `fxIds()`。
+ */
 function pickIds(n, seed) {
   const rng = makeRng(seed);
   const ids = POOL.items.map((it) => it.id);
@@ -50,6 +57,27 @@ function pickIds(n, seed) {
   }
   return ids.slice(0, n).sort();
 }
+
+// ── 凍結 fixture（tools/build-test-fixtures.mjs 產生） ──────────────
+/**
+ * `pickIds` 洗的是**活的** `data/pool.json`。seed 固定，被洗的陣列卻每月隨上游
+ * TFDA 資料集改變——同一個 seed 抽到的是另一組品項，凡是依賴組成的斷言就整批變紅。
+ * 2026-09-01 的排程更新（3941 → 3950 題）一次打掉 6 條，程式碼一行沒改。
+ *
+ * `FX_POOL` 是凍結下來的 600 筆題庫，`fxIds(name)` 是其中一組已知性質的院內清單。
+ * 用它的測試必須 `boot({ pool: FX_POOL, … })`，並把 `FX_POOL.items` 傳給
+ * `expectProbe()`——測試與受測 app 看到的是同一份題庫，這是這些斷言的前提。
+ *
+ * pool（600）遠大於任何子集（最大 60）是刻意的：pool 若等於子集，
+ * 「出題封閉於院內清單」就變成恆真，實作誤用全庫也抓不到。
+ */
+const FX_POOL = JSON.parse(fs.readFileSync(path.join(ROOT, 'tests/fixtures/pool.json'), 'utf8'));
+const FX_SUBSETS = JSON.parse(fs.readFileSync(path.join(ROOT, 'tests/fixtures/subsets.json'), 'utf8'));
+const fxIds = (name) => {
+  const s = FX_SUBSETS[name];
+  assert.ok(s, `fixture 子集 ${name} 不存在`);
+  return [...s.ids];
+};
 
 const payloadOf = (ids, unlisted = 0) => encodeFormulary(ids, unlisted);
 
@@ -110,8 +138,8 @@ async function boot({
   return dom;
 }
 
-const savedJson = (payload) => JSON.stringify({
-  v: 1, payload, savedAt: '2026-08-11T00:00:00.000Z', srcVersion: POOL.meta?.source_version ?? null,
+const savedJson = (payload, pool = POOL) => JSON.stringify({
+  v: 1, payload, savedAt: '2026-08-11T00:00:00.000Z', srcVersion: pool.meta?.source_version ?? null,
 });
 
 const levelCards = (dom) => dom.$('levelPick').querySelectorAll('.level');
@@ -667,20 +695,22 @@ describe('C45 禁用級別是「可見且程式化 no-op」', () => {
    * **每一級各驗一次**（依 codex-review TG-4）。原本只驗 L2——
    * 弱化實作可以只對 L2 套 `levelOff()`，L1／L3 照樣讓人按下去。
    *
-   * 三份 fixture 各自讓不同的級別撐不起來（實測值，K 與失敗代碼在測試內自檢）：
-   * 12 品項 → L1 的 K=12 未達 13、L3 還行；30 品項 → L2 湊不到同形同色誘答；9 品項 → 三級全禁。
+   * 三份 fixture 各自讓不同的級別撐不起來（凍結子集，K 與失敗代碼在測試內自檢）：
+   * `l1-off-k12` 12 品項 → L1 的 K=12 未達 13、L3 還行；
+   * `l2-off-k29` 30 品項 → L2 湊不到同形同色誘答；`all-off-k9` 9 品項 → 三級全禁。
    *
    * **L1 的 fixture 由 16 改為 12（v5.2）**：16 品項時 L1 的 K=16，出 20 題要 K≥23、
    * 出 10 題只要 K≥13——所以它現在是「10 題可用、20 題不可用」，整級不再禁用。
    * 這不是測試被改綠，是卷長選項的預期效果；那組 fixture 移去 A66 驗混合格。
    */
-  for (const [level, n, seed] of [[Level.L1, 12, 4501], [Level.L2, 30, 4545], [Level.L3, 9, 4503]]) {
+  for (const [level, fx] of [
+    [Level.L1, 'l1-off-k12'], [Level.L2, 'l2-off-k29'], [Level.L3, 'all-off-k9'],
+  ]) {
     test(`${level} 不可用時：狀態與原因都在，且程式化呼叫零副作用`, async () => {
-      needPool();
-      const ids = pickIds(n, seed);
+      const ids = fxIds(fx);
       const payload = payloadOf(ids);
-      const dom = await boot({ saved: savedJson(payload) });
-      assert.equal(expectProbe(payload, level, ids).available, false,
+      const dom = await boot({ saved: savedJson(payload, FX_POOL), pool: FX_POOL });
+      assert.equal(expectProbe(payload, level, ids, FX_POOL.items).available, false,
         `${level} 的 fixture 必須真的不可用，否則這條驗不到東西`);
 
       const card = cardFor(dom, level);
@@ -709,12 +739,11 @@ describe('C45 禁用級別是「可見且程式化 no-op」', () => {
   }
 
   test('三級全禁用時要提示重新產生連結（D41）', async () => {
-    needPool();
-    const ids = pickIds(9, 4503);
+    const ids = fxIds('all-off-k9');
     const payload = payloadOf(ids);
-    const dom = await boot({ saved: savedJson(payload) });
+    const dom = await boot({ saved: savedJson(payload, FX_POOL), pool: FX_POOL });
     for (const lv of [Level.L1, Level.L2, Level.L3]) {
-      assert.equal(expectProbe(payload, lv, ids).available, false);
+      assert.equal(expectProbe(payload, lv, ids, FX_POOL.items).available, false);
       assert.equal(cardFor(dom, lv).disabled, true);
     }
     assert.equal(dom.hidden('startFxWarn'), false);
@@ -722,15 +751,14 @@ describe('C45 禁用級別是「可見且程式化 no-op」', () => {
   });
 
   test('L2 撐不起時：狀態與原因文字都在，且程式化呼叫零副作用', async () => {
-    needPool();
     // 30 品項：L1／L3 撐得住，L2 因為湊不到同形同色又刻字互異的誘答而不可用
-    const ids = pickIds(30, 4545);
+    const ids = fxIds('l2-off-k29');
     const payload = payloadOf(ids);
-    const dom = await boot({ saved: savedJson(payload) });
+    const dom = await boot({ saved: savedJson(payload, FX_POOL), pool: FX_POOL });
 
-    const p2 = expectProbe(payload, Level.L2, ids);
+    const p2 = expectProbe(payload, Level.L2, ids, FX_POOL.items);
     assert.equal(p2.available, false, 'fixture 必須讓 L2 不可用，否則這條驗不到東西');
-    assert.equal(expectProbe(payload, Level.L1, ids).available, true);
+    assert.equal(expectProbe(payload, Level.L1, ids, FX_POOL.items).available, true);
 
     // (a) semantic disabled 與原因文字都存在，**不是** hidden
     const card = cardFor(dom, Level.L2);
@@ -779,17 +807,20 @@ describe('C46／C47 紀錄：院內版完全不寫，通用版照常', () => {
      */
     // **三級都要驗**（依 codex-review TG-4）：原本只有 L1 正常卷與 L3 短卷，
     // 院內版 L2 若仍寫 record 不會被抓到
-    for (const [label, n, level] of [
-      ['L1 正常卷', 300, Level.L1], ['L2 正常卷', 300, Level.L2],
-      ['L3 正常卷', 300, Level.L3], ['短卷', 15, Level.L3],
+    // 前三筆只要「夠大」，用活題庫；短卷要求「組得出卷但不足 20 題」，
+    // 那是組成敏感的性質，改用凍結子集（否則上游月更就會讓它變成正常卷或整級不可用）
+    for (const [label, n, level, fx] of [
+      ['L1 正常卷', 300, Level.L1, null], ['L2 正常卷', 300, Level.L2, null],
+      ['L3 正常卷', 300, Level.L3, null], ['短卷', 15, Level.L3, 'short-deck'],
     ]) {
-      const ids = pickIds(n, 4600 + n);
+      const pool = fx ? FX_POOL : POOL;
+      const ids = fx ? fxIds(fx) : pickIds(n, 4600 + n);
       const payload = payloadOf(ids);
-      const dom = await boot({ saved: savedJson(payload) });
+      const dom = await boot({ saved: savedJson(payload, pool), ...(fx ? { pool } : {}) });
       storeControl.map.set(REC_KEY, sentinel);
       const before = storeControl.calls.length;
 
-      const want = expectProbe(payload, level, ids);
+      const want = expectProbe(payload, level, ids, pool.items);
       assert.equal(want.available, true, `${label} fixture 必須可組卷`);
       if (label === '短卷') assert.ok(want.quiz.length < QUIZ_SIZE, '短卷 fixture 必須真的短');
       else assert.equal(want.quiz.length, QUIZ_SIZE);
@@ -1218,11 +1249,12 @@ describe('主持人自查 S-1／S-2（批次 4 覆審期間發現）', () => {
   });
 
   test('切回全題庫：只移除那一個 key，且真的回到通用版', async () => {
-    needPool();
-    const ids = pickIds(30, 5401);          // 這份清單的 L2 是禁用的，切回後要解除
+    const ids = fxIds('exit-l2off');        // 這份清單的 L2 是禁用的，切回後要解除
     const payload = payloadOf(ids);
     const recSentinel = JSON.stringify({ schema: 1, sentinel: true });
-    const dom = await boot({ saved: savedJson(payload), records: recSentinel });
+    const dom = await boot({
+      saved: savedJson(payload, FX_POOL), pool: FX_POOL, records: recSentinel,
+    });
     assert.equal(dom.hidden('startFxNote'), false);
     // V5.1：出口移進收合區後就不再是 `#startFxNote` 的子節點，得自己切顯示。
     // 〔堵〕忘了切 → 通用版也會出現「切回全題庫」，按下去是無事發生的破壞性操作
@@ -1256,7 +1288,7 @@ describe('主持人自查 S-1／S-2（批次 4 覆審期間發現）', () => {
     cardFor(dom, Level.L1).click();
     dom.$('btnStart').click();
     Math.random = REAL_RANDOM;
-    const subsetAns = new Set(POOL.items.filter((it) => ids.includes(it.id)).map((it) => it.ans));
+    const subsetAns = new Set(FX_POOL.items.filter((it) => ids.includes(it.id)).map((it) => it.ans));
     assert.equal(Number(dom.$('qTotal').textContent), QUIZ_SIZE, '切回後應是完整 20 題');
     assert.ok(optionNames(dom).some((n) => !subsetAns.has(n)),
       '選項仍全部落在原本那 30 個院內品項內——索引沒有換回全庫');
@@ -1283,11 +1315,10 @@ describe('主持人自查 S-1／S-2（批次 4 覆審期間發現）', () => {
      * 第一回合有 probe 產物護著，第二回合起是擲硬幣——
      * 那條路徑原本走 `fatal()`，會把起始頁與答題頁全部藏掉，只能重新整理。
      */
-    needPool();
-    const ids = pickIds(30, 4545);
+    const ids = fxIds('l2-off-k29');
     const payload = payloadOf(ids);
-    const dom = await boot({ saved: savedJson(payload) });
-    const want = expectProbe(payload, Level.L1, ids);
+    const dom = await boot({ saved: savedJson(payload, FX_POOL), pool: FX_POOL });
+    const want = expectProbe(payload, Level.L1, ids, FX_POOL.items);
     assert.equal(want.available, true);
 
     cardFor(dom, Level.L1).click();
@@ -1717,16 +1748,15 @@ describe('A66 D55 aggregate：一格可用、一格不可用時，級別仍然�
    * 那正是本功能要帶來的效果。
    */
   test('L1 K=16：10 題可用、20 題不可用，級別本身仍可用且可出卷', async () => {
-    needPool();
-    const ids = pickIds(16, 4501);
+    const ids = fxIds('len-k16');
     const payload = payloadOf(ids);
-    const p = expectProbe(payload, Level.L1, ids);
+    const p = expectProbe(payload, Level.L1, ids, FX_POOL.items);
 
     assert.equal(p.byLen[10].available, true, 'fixture 必須讓 10 題可用');
     assert.equal(p.byLen[QUIZ_SIZE].available, false, 'fixture 必須讓 20 題不可用');
     assert.equal(p.available, true, 'aggregate 用了 every——一格不可用就把整級禁掉了');
 
-    const dom = await boot({ saved: savedJson(payload) });
+    const dom = await boot({ saved: savedJson(payload, FX_POOL), pool: FX_POOL });
     const card = cardFor(dom, Level.L1);
     assert.equal(card.disabled, false, '級別不該被禁用');
 
@@ -1749,16 +1779,15 @@ describe('A66 D55 aggregate：一格可用、一格不可用時，級別仍然�
      *       （這份 fixture 是 13），它同樣可能被禁用——只掃標準卷長會讓那顆按鈕
      *       變灰卻沒有任何解釋。**單元測試與靜態契約都沒抓到，是人工瀏覽器留檔抓到的。**
      */
-    needPool();
-    const ids = pickIds(16, 4501);
+    const ids = fxIds('len-k16');
     const payload = payloadOf(ids);
-    const p = expectProbe(payload, Level.L1, ids);
+    const p = expectProbe(payload, Level.L1, ids, FX_POOL.items);
     // fixture 自檢：必須真的有一個「非標準卷長且被禁用」的格
     assert.deepEqual(p.selectable, [10, 13], 'fixture 的可選卷長變了，這條就驗不到東西');
     assert.equal(p.byLen[13].available, false, 'fixture 的 13 題格必須是不可用的');
     assert.equal(p.byLen[13].code, 'QUIZ_ASSEMBLY_FAILED');
 
-    const dom = await boot({ saved: savedJson(payload) });
+    const dom = await boot({ saved: savedJson(payload, FX_POOL), pool: FX_POOL });
     cardFor(dom, Level.L1).click();
     const shown = [...dom.$('lenPick').querySelectorAll('.qlen')].map((b) => Number(b.dataset.len));
     assert.deepEqual(shown, [10, 13, 20], '選擇器沒畫出該級的非標準卷長');
@@ -1774,9 +1803,8 @@ describe('A66 D55 aggregate：一格可用、一格不可用時，級別仍然�
   });
 
   test('A67 C55 的原因必須分辨「品項數不足」與「這份清單組不出」', async () => {
-    needPool();
-    const ids = pickIds(16, 4501);
-    const dom = await boot({ saved: savedJson(payloadOf(ids)) });
+    const ids = fxIds('len-k16');
+    const dom = await boot({ saved: savedJson(payloadOf(ids), FX_POOL), pool: FX_POOL });
     cardFor(dom, Level.L1).click();
     // 原因是多條合併（13 與 20 各一句），**必須逐句檢查**——
     // 對整串做 `!/組不出/` 只證明「沒有任何一句提到組不出」，
@@ -1804,10 +1832,9 @@ describe('A56 probe 產物的消費：identity 要逐題鎖住，不是比 token
    *       (c) 用 token 集合當 identity——`token: i + 1` 讓它恆等（判定 V-1）。
    */
   test('選 10 題時消費的是 10 題格的產物，且開始後零組卷、零 RNG', async () => {
-    needPool();
-    const ids = pickIds(60, 4601);
+    const ids = fxIds('len-both');
     const payload = payloadOf(ids);
-    const prep = prepareFormulary(POOL.items, new Set(ids));
+    const prep = prepareFormulary(FX_POOL.items, new Set(ids));
     const p = probeLevel({ payload, level: Level.L1, items: prep.items, index: prep.index });
     assert.equal(p.byLen[10].available, true, 'fixture 的 10 題格必須可用');
     assert.equal(p.byLen[QUIZ_SIZE].available, true, 'fixture 的 20 題格也要可用（才驗得到取錯格）');
@@ -1817,7 +1844,7 @@ describe('A56 probe 產物的消費：identity 要逐題鎖住，不是比 token
     assert.notDeepEqual(want10, want20.slice(0, 10),
       '兩格的前 10 題若相同，這條就分不出「消費 10 題格」與「截斷 20 題格」');
 
-    const dom = await boot({ saved: savedJson(payload) });
+    const dom = await boot({ saved: savedJson(payload, FX_POOL), pool: FX_POOL });
     cardFor(dom, Level.L1).click();
     lenBtn(dom, 10).click();
 
@@ -1851,10 +1878,9 @@ describe('A63 院內版不寫最佳紀錄（D40 > D50）', () => {
    */
   for (const len of [10, QUIZ_SIZE]) {
     test(`${len} 題全對卷跑完，records key 內容與 mutation 都不變`, async () => {
-      needPool();
-      const ids = pickIds(60, 4602);
+      const ids = fxIds('len-records');
       const payload = payloadOf(ids);
-      const p = expectProbe(payload, Level.L1, ids);
+      const p = expectProbe(payload, Level.L1, ids, FX_POOL.items);
       assert.equal(p.byLen[len].available, true, `fixture 的 ${len} 題格必須可用`);
 
       // 保證會被打破的 sentinel：0 分／0 連對。全對卷必定超越它
@@ -1863,7 +1889,7 @@ describe('A63 院內版不寫最佳紀錄（D40 > D50）', () => {
         L1: { bestScore: { value: 0, date: '2026-01-01', pool: '000000000000' },
               bestStreak: { value: 0, date: '2026-01-01', pool: '000000000000' } },
       });
-      const dom = await boot({ saved: savedJson(payload), records: sentinel });
+      const dom = await boot({ saved: savedJson(payload, FX_POOL), pool: FX_POOL, records: sentinel });
       const beforeRaw = storeControl.map.get(REC_KEY);
       const beforeMut = storeControl.mutations().length;
 
@@ -1894,10 +1920,9 @@ describe('A54 卷長守門是程式化 no-op（D55.1）', () => {
    * **不假裝這條測到了它。**
    */
   test('程式化點擊被禁用的 20 題 → 選取不變、CTA 不變，且零副作用', async () => {
-    needPool();
-    const ids = pickIds(16, 4501);            // L1：10 題可用、20 題不可用
+    const ids = fxIds('len-k16');             // L1：10 題可用、20 題不可用
     const payload = payloadOf(ids);
-    const dom = await boot({ saved: savedJson(payload) });
+    const dom = await boot({ saved: savedJson(payload, FX_POOL), pool: FX_POOL });
     cardFor(dom, Level.L1).click();
 
     const snap = {
@@ -1930,9 +1955,8 @@ describe('A54 卷長守門是程式化 no-op（D55.1）', () => {
 
   test('接著按下開始：出的仍是可用的 10 題卷，不是被擋下的 20 題', async () => {
     // 〔堵〕M9：選擇器顯示 10、實際抽 20。這條把「畫面說的」與「引擎收到的」綁在一起
-    needPool();
-    const ids = pickIds(16, 4501);
-    const dom = await boot({ saved: savedJson(payloadOf(ids)) });
+    const ids = fxIds('len-k16');
+    const dom = await boot({ saved: savedJson(payloadOf(ids), FX_POOL), pool: FX_POOL });
     cardFor(dom, Level.L1).click();
     lenBtn(dom, QUIZ_SIZE).click();           // 被擋下
     dom.$('btnStart').click();
