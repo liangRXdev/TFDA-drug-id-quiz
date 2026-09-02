@@ -36,8 +36,23 @@ const REQUIRED_CASES = [
   'CR-1 容量檢查排在 pool.json 回寫之前',
 ];
 
-const run = (args, opts = {}) => execFileSync(args[0], args.slice(1),
-  { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 300_000, ...opts });
+/**
+ * 跑子行程並以 UTF-8 讀回 stdout。
+ *
+ * `PYTHONIOENCODING` 不可省：Windows 上 Python 的 stdout 預設跟著主控台的
+ * 字碼頁走（繁中環境是 CP950），而這裡用 `encoding: 'utf8'` 解碼——
+ * 探針印的中文會整段變成替換字元，`/項全部通過/` 於是永遠對不上。
+ * CI 是 UTF-8 的 Ubuntu 所以全綠，紅的只有本機：**測試要解析誰的輸出，
+ * 就得由測試把那一端的編碼釘死**，不能靠執行環境剛好對。
+ */
+const run = (args, opts = {}) => execFileSync(args[0], args.slice(1), {
+  cwd: ROOT,
+  encoding: 'utf8',
+  stdio: ['ignore', 'pipe', 'pipe'],
+  timeout: 300_000,
+  ...opts,
+  env: { ...process.env, PYTHONIOENCODING: 'utf-8', ...(opts.env ?? {}) },
+});
 
 /**
  * 解析 uv 執行檔的路徑。
@@ -74,6 +89,12 @@ describe('TG-2／TG-3 fetch-images.py 的行為驗收（Python 探針）', () =>
     // --locked：照 tests/fetch_images_probe.py.lock 安裝，與正式管線同一條紀律。
     // 探針不觸網（download 被換掉）、不寫 repo（ROOT 指向暫存目錄）
     output = run([uv, 'run', '--locked', '--script', 'tests/fetch_images_probe.py']);
+    // 〔堵〕解碼一旦錯掉，下面每一條斷言都是在比對亂碼——`項全部通過` 對不上會
+    //       被讀成「探針沒跑完」，覆蓋項目缺一大半會被讀成「有人把測試拿掉了」。
+    //       兩種都是假的診斷，所以在這裡先擋，讓錯誤指向真正的原因。
+    assert.ok(!output.includes('�'),
+      `探針輸出不是 UTF-8（含替換字元）——子行程的編碼沒被釘住：
+${output}`);
   });
 
   test('探針全部通過', () => {
