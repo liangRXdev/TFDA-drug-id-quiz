@@ -33,20 +33,24 @@ jobs:
     # tag 可以被上游改指向，等於讓第三方在我們的發布路徑上獲得任意程式碼執行。
     # 尾註的版本號只是給人看的，權威是 SHA。升版時一起改兩者。
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           # 不可降回 20：`node --test` 的 glob 展開是 Node 21 才有的。
           # Node 20 會把 `tests/**/*.test.mjs` 當字面路徑，
           # 於是「測試找不到檔案」被當成「題庫沒過驗收」——2026-08-01 的假警報。
           node-version: '24'
 
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86   # v5.4.2
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d   # v10.0.1
         with:
           # 釘住 action 卻讓它去抓「最新的 uv」，等於留著同一個入口：
           # 解析與安裝 Python 依賴的就是這支執行檔
           version: '0.11.8'
+          # 預設 glob 是 `**/uv.lock,**/requirements*.txt`，這個 repo 一個都沒有——
+          # 於是快取鍵永遠不變，換了 lock 也照樣命中舊快取（action 自己會警告）。
+          # 這裡的 Python 依賴由 PEP 723 script lock 決定，指到那份檔案才對得起來。
+          cache-dependency-glob: 'tools/fetch-images.py.lock'
 
       # ── 建置題庫 ────────────────────────────────────────────────
       # 任一驗證失敗即 exit 1，data/ 不變（規格 D9 全有全無、B1）
@@ -129,7 +133,7 @@ jobs:
       # 變動幅度超標時 build-pool 會 exit 1；開 issue 交人工裁決（規格 D9／4-2）
       - name: 失敗時開 issue
         if: failure() && github.event_name == 'schedule'
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b   # v7.1.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3   # v9.0.0
         with:
           script: |
             const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
