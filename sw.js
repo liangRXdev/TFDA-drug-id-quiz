@@ -24,7 +24,8 @@
  * `tests/sw.test.mjs` 的 C31 把這個字串釘死，改版時必須一併改，
  * 「這批沒新增資源所以不用升」的判斷不留給下一個人。
  */
-const CACHE = 'tfda-drug-id-quiz-v5';
+const PREFIX = 'tfda-drug-id-quiz-';
+const CACHE = `${PREFIX}v6`;
 const SHELL = [
   './',
   'index.html',
@@ -48,7 +49,12 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      // 只汰換**本工具自己的** cache。
+      // 本站與其他工具共用 liangrxdev.github.io 這個 origin，CacheStorage 是整個
+      // origin 共用的——少了前綴守衛，這裡的 activate 會把鄰居工具的離線快取一起刪光。
+      .then((keys) => Promise.all(
+        keys.filter((k) => k.startsWith(PREFIX) && k !== CACHE).map((k) => caches.delete(k)),
+      ))
       .then(() => self.clients.claim()),
   );
 });

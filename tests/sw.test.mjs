@@ -21,8 +21,8 @@ import { ROOT } from './_ui-harness.mjs';
 const ORIGIN = 'https://example.test';
 
 /** 把 sw.js 載進假的 SW 全域，回傳事件 listener 與快取內容 */
-function loadSw() {
-  const src = fs.readFileSync(path.join(ROOT, 'sw.js'), 'utf8');
+function loadSw({ existingCaches = ['tfda-drug-id-quiz-v1'], source } = {}) {
+  const src = source ?? fs.readFileSync(path.join(ROOT, 'sw.js'), 'utf8');
   const listeners = {};
   const store = new Map();
 
@@ -32,12 +32,13 @@ function loadSw() {
     match: async (req) => store.get(typeof req === 'string' ? req : req.url),
   };
   const opened = [];
+  const deleted = [];
   const caches = {
     // 〔v4.5 C31〕記錄實際被開啟的 cache 名稱：
     // 只比對原始碼裡的常數字串，新增一個沒被用作 cache 名稱的常數即可騙過
     open: async (name) => { opened.push(name); return cache; },
-    keys: async () => ['tfda-drug-id-quiz-v1'],
-    delete: async () => true,
+    keys: async () => existingCaches.slice(),
+    delete: async (k) => { deleted.push(k); return true; },
     match: async (req) => cache.match(req),
   };
   const self = {
@@ -57,7 +58,7 @@ function loadSw() {
   new Function('self', 'caches', 'fetch', 'URL', 'Error', src)(
     self, caches, fetchStub, URL, Error,
   );
-  return { listeners, store, fetched, caches, opened };
+  return { listeners, store, fetched, caches, opened, deleted };
 }
 
 /** 驅動 fetch handler，回報 respondWith 是否被呼叫 */
@@ -149,9 +150,14 @@ describe('C31 每批交付無條件升 CACHE 版本', () => {
     // 〔堵〕只改既有 shell 檔而不新增資源時，條件式斷言會直接跳過升版檢查。
     //       這裡把版本釘死：改 shell 就必須同時改 sw.js 與這一行，
     //       「這批沒新增資源所以不用升」的判斷不留給下一個人
-    const m = /const CACHE = '([^']+)'/.exec(src);
-    assert.ok(m, 'sw.js 必須有 const CACHE');
-    assert.equal(m[1], 'tfda-drug-id-quiz-v5', '本批（V5 批次 4 院內清單 UI）必須升到 v5');
+    // 〔SW 前綴守衛〕CACHE 改由 PREFIX 組出，兩者不會在升版時脫鉤；
+    //               版本字串照舊釘死在這一行，C31 守的不變量沒有改變。
+    const mp = /const PREFIX = '([^']+)'/.exec(src);
+    const mc = /const CACHE = `\$\{PREFIX\}([^`]+)`/.exec(src);
+    assert.ok(mp, 'sw.js 必須有 const PREFIX');
+    assert.ok(mc, 'sw.js 的 CACHE 必須由 PREFIX 組出（前綴守衛靠這個關聯成立）');
+    assert.equal(mp[1] + mc[1], 'tfda-drug-id-quiz-v6',
+      '本批（SW 快取前綴守衛）必須升到 v6');
   });
 
   test('〔v4.5〕cache 名稱由 install 實際使用的值取證，不只比對原始碼常數', async () => {
@@ -160,7 +166,7 @@ describe('C31 每批交付無條件升 CACHE 版本', () => {
     let done;
     listeners.install({ waitUntil: (p) => { done = p; } });
     await done;
-    assert.deepEqual(opened, ['tfda-drug-id-quiz-v5'],
+    assert.deepEqual(opened, ['tfda-drug-id-quiz-v6'],
       `install 實際開啟的 cache 名稱是 ${JSON.stringify(opened)}`);
   });
 
@@ -174,6 +180,69 @@ describe('C31 每批交付無條件升 CACHE 版本', () => {
       if (u === './') continue;
       assert.ok(fs.existsSync(path.join(ROOT, u)), `shell 清單引用了不存在的檔案：${u}`);
     }
+  });
+});
+
+describe('activate 只汰換本工具自己的 cache', () => {
+  // 本站與其他工具共用 liangrxdev.github.io 這個 origin，CacheStorage 是整個
+  // origin 共用的。少了前綴守衛，這裡的 activate 會把鄰居工具（藥價站、回收
+  // 看板、藥丸偵探……）的離線快取一起刪光——他們的 SW 沒做錯任何事。
+  const NEIGHBOURS = [
+    'nhi-price-shell-v3',
+    'tfda-static-v2',
+    'tfda-data-v2',
+    'recall-static-v4',
+    'pill-shell-v7',
+    'workbox-precache-v2-https://liangrxdev.github.io/migraine-tracker/',
+  ];
+
+  /** 現行 cache 名稱由 install 實際開啟的值取證——升版時這一區不必跟著改 */
+  async function currentCache() {
+    const { listeners, opened } = loadSw();
+    let done;
+    listeners.install({ waitUntil: (p) => { done = p; } });
+    await done;
+    return opened[0];
+  }
+
+  async function activate(existingCaches, source) {
+    const { listeners, deleted } = loadSw({ existingCaches, source });
+    let done;
+    listeners.activate({ waitUntil: (p) => { done = p; } });
+    await done;
+    return deleted;
+  }
+
+  test('自家舊版會被刪、現行版留著', async () => {
+    const stale = 'tfda-drug-id-quiz-v0';   // 任何一個更舊的自家版本
+    const deleted = await activate([await currentCache(), stale]);
+    assert.deepEqual(deleted, [stale]);
+  });
+
+  test('鄰居工具的 cache 一個都不准刪', async () => {
+    const deleted = await activate([await currentCache(), ...NEIGHBOURS]);
+    assert.deepEqual(deleted, [],
+      `activate 刪了不屬於本工具的 cache：${JSON.stringify(deleted)}`);
+  });
+
+  test('〔堵〕前綴不得寬到吃掉同單位其他 TFDA 工具', async () => {
+    // 'tfda-' 這種前綴看起來也「只刪自己人」，但 TFDA-drug-info-search 用的
+    // 正是 tfda-static-／tfda-data-／tfda-fonts-
+    const deleted = await activate([await currentCache(), 'tfda-static-v2', 'tfda-data-v2']);
+    assert.deepEqual(deleted, []);
+  });
+
+  test('〔哨兵〕上面三條在守衛被抽掉時必須轉紅', async () => {
+    // 〔堵〕注入點寫錯的話，就算守衛根本不存在，上面三條也會全綠。
+    //       這裡把守衛從原始碼抽掉重跑同一組輸入（不動檔案，直接餵原始碼），
+    //       證明它們抓得到原本那批紅
+    const src = fs.readFileSync(path.join(ROOT, 'sw.js'), 'utf8');
+    const unguarded = src.replace('k.startsWith(PREFIX) && ', '');
+    assert.notEqual(unguarded, src, '守衛的形狀變了，這條哨兵已經沒打中目標');
+
+    const deleted = await activate([await currentCache(), ...NEIGHBOURS], unguarded);
+    assert.ok(NEIGHBOURS.every((n) => deleted.includes(n)),
+      `抽掉守衛後鄰居沒被刪光（只刪了 ${JSON.stringify(deleted)}）——上面三條證明不了任何事`);
   });
 });
 
