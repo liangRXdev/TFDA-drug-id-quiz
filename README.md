@@ -1,252 +1,254 @@
-# 藥品辨識王
+# Drug ID Quiz (藥品辨識王)
+
+**English** | [繁體中文](README.zh-TW.md)
 
 [![Live Demo](https://img.shields.io/badge/Live%20Demo-Click%20Here-blue?style=for-the-badge)](https://liangrxdev.github.io/TFDA-drug-id-quiz/)
 
-藥師外觀辨識自我測驗。以衛福部食藥署「藥品外觀資料集」出題，依實拍圖與外觀特徵辨識英文品名。
+A self-test for pharmacists on identifying drugs by appearance. Questions are drawn from the Taiwan Food and Drug Administration (TFDA) "Drug Appearance Dataset": identify the English brand name from the real photo and appearance features. The interface is in Traditional Chinese.
 
-- 三種難度，每回合隨機 **10 或 20 題**（可選），答案鍵不重複
-- **快速閃卡**模式：不計分、只看圖翻藥名，測驗前先熟悉外觀用
-- **錯題再戰**：一回合結束後把答錯的題再出一次（同藥名、換一張實拍圖、重抽誘答）
-- 答題中顯示連對數，結算給稱號；三難度的最佳分數與最長連對存在**瀏覽器本機**
-- **院內清單客製化**：教學藥師貼上院內藥證字號 → 產一條連結 → 新人點開後只出院內的藥
-- 完成後產生總分與逐題檢討，成績卡可下載為 PNG
-- 純靜態、零建置、無後端、無帳號；**可安裝為 PWA**（需連網使用）
+- Three difficulty levels; each round has **10 or 20 random questions** (your choice) with no repeated answer keys
+- **Flashcard mode**: unscored, just look at the image and flip to see the name — for getting familiar before a quiz
+- **Retry mistakes**: after a round, re-ask the questions you missed (same drug name, a different real photo, new distractors)
+- Shows your current streak while answering and awards a title at the end; best score and longest streak for each level are stored **locally in the browser**
+- **Hospital formulary customization**: a teaching pharmacist pastes the hospital's license numbers → generates a link → trainees who open it are only quizzed on the hospital's drugs
+- At the end you get a total score and per-question review; the score card can be downloaded as PNG
+- Pure static, zero build, no backend, no accounts; **installable as a PWA** (requires a connection)
 
-## 難度
+## Difficulty
 
-| 級別 | 題型 | 提示 | 亂猜基線 |
+| Level | Question type | Hint | Chance baseline |
 |---|---|---|---|
-| **簡單** | 看圖 → 從四個藥名選一個（附中文品名） | — | 25 |
-| **中級** | 給藥名 → 從四張圖選一張 | 可刪去一個錯項（滿分降為 0.5） | 25 |
-| **困難** | 看圖 → 直接輸入英文品名 | 首字母＋字數（滿分降為 0.5） | 0 |
+| **Easy** | Image → pick one of four drug names (with Chinese name) | — | 25 |
+| **Medium** | Drug name → pick one of four images | Eliminate one wrong option (max 0.5 points) | 25 |
+| **Hard** | Image → type the English brand name | First letter + length (max 0.5 points) | 0 |
 
-**三級的分數不可互相比較**，成績卡上也印了這句警語。簡單級答對四分之一題目只是亂猜的期望值，
-沿用困難級的及格線會把「幾乎全靠猜」標成尚可——所以三級各有自己的門檻，並一律標示亂猜基線。
+**Scores across levels are not comparable**, and the score card says so. On Easy, getting a quarter right is just the expected value of guessing;
+using Hard's pass mark would label "almost entirely guessing" as acceptable — so each level has its own thresholds, and the chance baseline is always shown.
 
-出題保證每題的三個誘答都與正解**可區分**：簡單級的誘答外觀（形狀、顏色）與正解完全不相交；
-中級的誘答則刻意同形同色、只差刻字，因為那一級考的就是刻字辨識。
-兩級都排除名稱過近的誘答（編輯距離 ≤1 或前綴包含），避免把「拼字像」誤當成「認得出」。
+Each question's three distractors are guaranteed to be **distinguishable** from the answer: on Easy, distractor appearance (shape, color) never overlaps the answer;
+on Medium the distractors deliberately share shape and color and differ only in imprint, because that level tests imprint recognition.
+Both levels exclude distractors with names that are too close (edit distance ≤1 or prefix containment), so "spells alike" is never mistaken for "recognizes".
 
-### 簡單級的中文品名是一個已知取捨
+### The Chinese name on Easy is a known trade-off
 
-簡單級的選項同時顯示英文與**完整官方中文品名**。中文品名幾乎都含劑型詞，
-而該級的誘答刻意選外觀不相交的藥、畫面上的「形狀」特徵格又已明示是膠囊還是錠——
-兩者一對，**實測 800 題模擬中有 22.4% 可以只憑「膠囊／錠」命中正解**，不必真的認得那顆藥。
+Options on Easy show both the English name and the **full official Chinese name**. Chinese names almost always contain a dosage-form word,
+and Easy's distractors are deliberately chosen with non-overlapping appearance while the on-screen "shape" feature already says capsule or tablet —
+put together, **in an 800-question simulation, 22.4% of questions could be answered from "capsule / tablet" alone**, without actually recognizing the drug.
 
-> 這個 22.4% 量於 3,913 筆的題庫版本，**尚未在 3,924 筆上重跑**——當時的模擬沒有落成腳本。
-> 取捨的方向不因這個數字的小幅變動而改變，但要引用精確值前應先把模擬寫成 `tools/` 下可重跑的腳本。
+> This 22.4% was measured on the 3,913-record pool version and **has not been rerun on the 3,924-record version** — the simulation was never committed as a script.
+> The direction of the trade-off doesn't change with small shifts in this number, but before quoting an exact value the simulation should be written as a rerunnable script under `tools/`.
 
-仍然這樣做，是因為替代方案更糟：把劑型詞從顯示的中文中挖掉，畫面上就不再是完整官方品名，
-而殘缺的中文品名在臨床情境會自成誤導來源。因此改以**標示**處理——
-難度卡上寫明「中文品名可透露劑型」，讓分數不被誤讀成外觀辨識能力。
+It is still done this way because the alternative is worse: stripping the dosage-form word from the displayed Chinese would no longer show the full official name,
+and a truncated Chinese drug name becomes a source of confusion in clinical settings. So it is handled by **labelling** instead —
+the difficulty card states "the Chinese name can reveal the dosage form", so the score isn't misread as appearance-recognition ability.
 
-真的要練外觀辨識，用中級或困難級。
+If you really want to practice appearance recognition, use Medium or Hard.
 
-## 快速閃卡（不計分）
+## Flashcards (unscored)
 
-一疊 20 張，只看圖，翻開顯示藥名，不作答、不計分、不需選難度。適合測驗前先熟悉外觀。
+A deck of 20 cards, image only; flip to reveal the name. No answering, no scoring, no difficulty to choose. Good for getting familiar before a quiz.
 
-翻面後若這張圖的外觀**不只對應一種藥**，背面會列出所有同外觀的其他品名。
-題庫實測有 124 組外觀鍵對應到多個藥名（涵蓋 311 題、7.9%，組內最多 9 個相異品名）——
-少列了，使用者會建立「這個外觀＝這顆藥」的錯誤唯一對應，那是本模式最主要的失效模式。
+After flipping, if the photo's appearance **matches more than one drug**, the back lists all other names sharing that appearance.
+The pool has 124 appearance keys mapping to multiple drug names (covering 311 questions, 7.9%, up to 9 distinct names in one group) —
+listing too few would teach a false one-to-one "this appearance = this drug", which is the main failure mode of this mode.
 
-判斷「外觀是否唯一」時刻意不看刻痕與尺寸：那兩項在照片上是弱訊號
-（刻痕淺、尺寸要比對標尺），閃卡呈現的就是照片，用照片看不出來的特徵去宣稱唯一並不成立。
+Score lines and size are deliberately ignored when deciding whether an appearance is unique: both are weak signals in a photo
+(score lines are shallow, size needs a ruler for comparison). Flashcards show photos, and claiming uniqueness based on features a photo can't show does not hold.
 
-## 題數（10 / 20 題）
+## Question Count (10 / 20)
 
-難度選好之後可以選這回合要出 10 題還是 20 題，預設 20。
+After choosing a difficulty you can pick 10 or 20 questions for the round; default is 20.
 
-**兩種卷長的最佳紀錄分開存。** 10 題卷答對 9 題是 90 分，20 題卷答對 18 題也是 90 分，
-但兩者的難度不同——放進同一格比較，短卷就成了刷高分的捷徑。這與三種難度
-分開存紀錄是同一個理由。起始頁的紀錄摘要因此一律標明卷長（`簡單 10 題 90.0／20 題 85.0`）。
+**Best records for the two lengths are stored separately.** 9/10 is 90 points and 18/20 is also 90 points,
+but they are not equally hard — put in the same slot, the short quiz becomes a shortcut to high scores. It is the same reason
+the three levels keep separate records. The start page's record summary therefore always states the length (`Easy 10 Q 90.0 / 20 Q 85.0`).
 
-院內清單模式下，某個難度的可出題品名不夠時，該卷長會**標為不可用並說明原因**，
-不會靜默改出比較短的一卷。品項數在 10～19 之間時仍可出該級撐得起的最長卷
-（例如 19 題），這是既有的短卷行為，沒有因為新增選項而消失。
+In hospital-formulary mode, if a level doesn't have enough eligible drug names, that length is **marked unavailable with the reason**;
+it never silently switches to a shorter quiz. With 10–19 eligible items you can still take the longest quiz that level supports
+(e.g. 19 questions) — that existing short-quiz behavior was kept when the option was added.
 
-閃卡張數與錯題再戰的題數**不受卷長選擇影響**：前者是不計分的瀏覽模式，
-後者的題數就是你答錯的題數。
+Flashcard count and retry-mistakes count are **not affected by the length choice**: the former is an unscored browsing mode,
+and the latter's count is simply how many you got wrong.
 
-## 錯題再戰
+## Retry Mistakes
 
-一回合結束後，結算頁會出現「錯題再戰（N 題）」，N 就是本回合答錯的題數。
-按下去會用**同一組答案鍵**重新組一份 N 題的複習卷：藥名不變，但**實拍圖在該藥名的
-紀錄裡重抽**、誘答重抽、正解位置重洗。只換題目位置的話，複習的是位置記憶不是外觀。
+After a round, the results page shows "Retry mistakes (N)", where N is the number you got wrong in that round.
+It builds an N-question review quiz from the **same answer keys**: the drug names stay the same, but **the photo is redrawn from that drug name's
+records**, distractors are redrawn and the answer position is reshuffled. Only moving the answer around would train position memory, not appearance.
 
-**複習卷不登錄紀錄、不給稱號、不出成績卡**，結算頁只顯示「本次 N 題答對 M 題」與逐題檢討。
-理由與「三級分數不可互相比較」同一條：複習卷的分母不是 20，題目也不是隨機抽樣，
-而是刻意挑出來的難題子集——在上面算出來的分數、亂猜基線、連對都不可跨回合比較。
-答題頁與結算頁都有「不計入紀錄」的標示，隨時看得出來自己在複習。
+**Review quizzes are not recorded, earn no title and produce no score card**; the results page only shows "M of N correct this time" and the per-question review.
+The reason is the same as "scores across levels are not comparable": the denominator isn't 20 and the questions aren't a random sample
+but a deliberately selected subset of hard ones — scores, chance baselines and streaks computed on it aren't comparable across rounds.
+Both the question page and the results page show "not counted toward records", so it's always clear you're reviewing.
 
-**中途放棄的處理是整次終止、退回原成績**，不會用題庫裡的其他藥把缺口補上。
-一般回合遇到圖片載不動會自動遞補一題，但那個遞補抽的是「任何還沒用過的藥」——
-用在複習卷上必然混入原本沒答錯的藥，而畫面上完全看不出來，
-使用者會以為自己已經複習完全部錯題。這是本功能最主要的失效模式。
-中級（四張圖）因此在**進入複習卷之前就先把整份卷的圖片載完**，載不完就根本不開始。
+**Abandoning midway terminates the whole review and returns to the original results**; gaps are never filled with other drugs from the pool.
+In a normal round an image that fails to load is automatically replaced with another question, but that replacement draws "any unused drug" —
+used in a review quiz it would inevitably mix in drugs you didn't get wrong, invisibly,
+and you'd believe you had reviewed all your mistakes. That is this feature's main failure mode.
+Medium (four images) therefore **loads all the quiz images before starting the review**; if they can't all load, it doesn't start.
 
-## 最佳紀錄
+## Best Records
 
-三種難度**各自**記錄最高分與最長連對，存在瀏覽器 `localStorage`，
-起始頁的「我的最佳紀錄」展開後可以看到與清除（收合狀態直接印各級最高分）。
-不上傳、不同步、換裝置或清除瀏覽器資料就沒了——本工具沒有後端也沒有帳號。
+Each of the three levels **separately** records its best score and longest streak in the browser's `localStorage`.
+Expand "My best records" on the start page to view and clear them (collapsed, it shows each level's best score).
+Nothing is uploaded or synced; switching devices or clearing browser data loses them — the tool has no backend and no accounts.
 
-分數與連對**分開判定**：分數更高但連對更短時只更新分數，不會把先前的最長連對洗掉。
-storage 不可用（無痕模式、被封鎖）時整個功能靜默降級，不影響作答與看成績。
+Score and streak are **judged separately**: a higher score with a shorter streak only updates the score and doesn't wipe the previous longest streak.
+If storage is unavailable (private mode, blocked), the feature silently degrades without affecting quizzes or results.
 
-## 題庫
+## Question Pool
 
-資料版本 2026-08-03（來源 ZIP 的資料產生日，顯示於頁尾）。以下為該版本的篩選結果，
-每月排程更新後由 `update-pool` workflow 重算——**數字會變，判準不會**。
+Data version 2026-08-03 (the data-generation date of the source ZIP, shown in the footer). The table below is the filtering result for that version;
+the `update-pool` workflow recomputes it after each monthly scheduled update — **the numbers change, the criteria don't**.
 
-| 篩選階段 | 剩餘 |
+| Filter stage | Remaining |
 |---|---|
-| 來源（opendata 42） | 6,269 |
-| Q1 固體口服劑型 | 5,698 |
-| Q2 有圖檔 | 5,697 |
-| Q3 答案鍵長度 ≥3 | 5,689 |
-| Q4 有刻字標記 | 4,094 |
-| **Q5 外觀特徵可與他品區分** | **3,924** |
+| Source (opendata 42) | 6,269 |
+| Q1 solid oral dosage forms | 5,698 |
+| Q2 has image | 5,697 |
+| Q3 answer key length ≥3 | 5,689 |
+| Q4 has imprint | 4,094 |
+| **Q5 appearance distinguishable from other products** | **3,924** |
 
-3,924 題對應 **3,135 個相異英文品名**（同一品名可能有多筆實拍紀錄，所以題數多於品名數）。
-每回合（10 或 20 題）抽的是品名而不是紀錄，不重複。簡單級與困難級可抽全部 3,135 個；
-中級要湊得出同形同色、只差刻字的三個誘答，可用品名 **3,067**（97.8%）。
+The 3,924 questions map to **3,135 distinct English brand names** (one name can have multiple photo records, so there are more questions than names).
+Each round (10 or 20 questions) samples names, not records, without repetition. Easy and Hard can draw from all 3,135;
+Medium needs three distractors with the same shape and color but a different imprint, leaving **3,067** usable names (97.8%).
 
-Q4 與 Q5 是刻意的：只憑「圓形／白色／無刻痕」無法唯一辨識，
-而外觀特徵完全相同卻品名不同的群組（實測 83 組）會讓藥師給出「對另一顆藥而言正確」的答案卻被判錯——
-那會強化錯誤記憶。**寧可少 170 題，不可誤判。**
+Q4 and Q5 are deliberate: "round / white / no score line" alone can't uniquely identify a drug,
+and groups with identical appearance but different names (83 groups measured) would mark a pharmacist wrong for an answer that is "correct for a different pill" —
+reinforcing a false memory. **Better 170 fewer questions than a wrong verdict.**
 
-## 院內清單客製化
+## Hospital Formulary Customization
 
-新人要認的是**自己醫院架上那幾百顆藥**，不是全台灣的 3,941 種。
-教學藥師在起始頁展開「教學藥師工具」→ 按「產生院內清單連結」，貼上院內的許可證字號（每行一個，
-Excel 多欄要自己指定分隔符與欄位），系統產一條網址；新人點開後，**題目與誘答都只從院內品項抽**。
+Trainees need to recognize **the few hundred drugs on their own hospital's shelves**, not all 3,941 in Taiwan.
+A teaching pharmacist expands "Teaching pharmacist tools" on the start page → clicks "Generate hospital list link" and pastes the hospital's license numbers (one per line;
+for multi-column Excel data, specify the delimiter and column yourself). The system produces a URL; trainees who open it get **questions and distractors drawn only from hospital items**.
 
-**零後端——清單完全編碼在網址裡**。不上傳任何資料，也沒有帳號或伺服器端狀態。
+**Zero backend — the list is fully encoded in the URL.** No data is uploaded; there are no accounts or server-side state.
 
-### 未命中的品項分三類，並直接給數字
+### Unmatched items fall into three categories, with numbers
 
-貼進去的字號不是每一筆都出得了題，工具會逐類說清楚，而不是只說「有幾筆失敗」：
+Not every pasted license number can become a question. The tool explains each category rather than just saying "N failed":
 
-| 類別 | 意思 | 實測全庫筆數 |
+| Category | Meaning | Count in full dataset |
 |---|---|---|
-| 口服但非固體 | 液劑／糖漿用粉劑／顆粒散劑等 | 572 |
-| 題目品質不足 | 無刻字（1,603）／外觀與他藥不可區分（170）／品名過短（8）／無外觀圖（1） | 1,782 |
-| **不在外觀資料集中** | 多為針劑、外用、眼藥等非口服劑型；也可能是已下市或字號誤植 | — |
+| Oral but not solid | Liquids / powders for syrup / granules, etc. | 572 |
+| Insufficient question quality | No imprint (1,603) / appearance not distinguishable (170) / name too short (8) / no appearance image (1) | 1,782 |
+| **Not in the appearance dataset** | Mostly injections, topicals, eye drops and other non-oral forms; may also be delisted or mistyped | — |
 
-第三類的措辭是刻意的。來源是一份**口服**藥品外觀資料集——形狀欄只有圓形／膠囊／橢圓形…／
-液劑／顆粒散劑，**沒有針劑、沒有外用、沒有眼藥**。醫院清單裡的針劑天天在用，
-把它們標成「查無此證，請核對」會讓教學藥師直接不信任整個工具。
-而本工具**無法區分**「合法但非口服」與「字號真的打錯」——做不到的區分就不假裝做得到。
+The wording of the third category is deliberate. The source is an **oral** drug appearance dataset — its shape field only has round / capsule / oval… /
+liquid / granule, **no injections, no topicals, no eye drops**. Hospital lists use injections every day;
+flagging them as "license not found, please check" would make teaching pharmacists distrust the whole tool.
+And the tool **cannot distinguish** "valid but not oral" from "genuinely mistyped" — it doesn't pretend to make a distinction it can't make.
 
-### N 與 K 是兩個不同的數字
+### N and K are two different numbers
 
-- **N**＝命中的品項數（貼進去的字號有幾筆在資料集裡）
-- **K**＝**該級別**可出題的答案鍵數
+- **N** = number of matched items (how many pasted license numbers are in the dataset)
+- **K** = number of answer keys usable **at that level**
 
-K 會比 N 小，而且**每一級不一樣**：中級要湊同形同色又刻字互異的誘答，
-實測 300 品項的清單 N=300 而 L2 的 K 只有 248。畫面上兩個數字分開顯示，不互相冒充。
+K is smaller than N and **differs by level**: Medium needs distractors with the same shape and color but different imprints;
+a measured 300-item list had N=300 but K for L2 was only 248. The two numbers are shown separately and never stand in for each other.
 
-級別可不可用**不是看 K 夠不夠大**，而是**真的組一卷出來**——
-逐鍵的可用性判定不看整卷脈絡，而每題的誘答不能是本卷其他題的正解，
-兩者之間沒有蘊含關係。撐不起來的級別會變灰、**寫出為什麼**（缺幾個藥名、至少要幾個），
-而不是藏起來讓人以為工具壞了。
+Whether a level is available **isn't decided by whether K is large enough** but by **actually building a quiz** —
+per-key eligibility ignores the whole-quiz context, while each question's distractors can't be another question's answer in the same quiz,
+and neither implies the other. Levels that can't be supported are greyed out **with the reason written out** (how many names are missing, the minimum needed),
+rather than hidden so it looks like the tool is broken.
 
-### 其他行為
+### Other behavior
 
-- **院內版不寫最佳紀錄**，只顯示當回合分數。不同醫院的清單共用同一紀錄、換清單前後基準不同，
-  那個數字沒有可比較的意義
-- **月更後品項消失只降級不阻斷**：以當前題庫重新比對、顯示縮水數字，
-  但**原始清單不會被覆寫**——品項日後回來就自動恢復。
-  「已不在最新資料中」的警告**只在品項真的兩份資料都查無時才出現**；
-  「在資料集中但不適合出題」的那些走灰字說明，不用警告色
-- 起始頁展開「題庫與資料來源」可**切回全題庫**（會把清單從這台瀏覽器移除，要再用得重新開連結）。
-  刻意收在裡面而不放主要視線上：這是破壞性操作，好按不是優點
-- 完整網址上限 1,800 字元，超過就明確拒絕產生連結，不會給一條在部分平台會被截斷的連結
+- **Hospital mode doesn't write best records**, only showing the current round's score. Different hospitals' lists would share one record and the baseline changes when switching lists,
+  so that number has no comparable meaning
+- **Items disappearing after a monthly update degrade rather than block**: the list is re-matched against the current pool and the reduced numbers shown,
+  but **the original list is never overwritten** — items that come back later are restored automatically.
+  The "no longer in the latest data" warning **appears only when an item is missing from both datasets**;
+  items "in the dataset but unsuitable for questions" get a grey explanatory note, not a warning color
+- Expand "Question pool and data source" on the start page to **switch back to the full pool** (this removes the list from this browser; reopen the link to use it again).
+  It is deliberately tucked away rather than in the main line of sight: it is destructive, and being easy to press is not a virtue
+- The full URL is capped at 1,800 characters; beyond that, link generation is explicitly refused rather than producing a link some platforms would truncate
 
-## 開發
+## Development
 
-需 Node ≥22（`node --test` 的 glob 展開自 Node 21 起才有）**與 uv**——
-`npm test` 有一組驗收要真的用 Pillow 解碼損毀的 WebP，那件事只有 Python 端做得到
-（見 `tests/fetch_images_probe.py`）。缺 uv 時該組**直接失敗而不是跳過**。
+Requires Node ≥22 (`node --test` glob expansion arrived in Node 21) **and uv** —
+one `npm test` acceptance group must really decode corrupted WebP with Pillow, which only the Python side can do
+(see `tests/fetch_images_probe.py`). Without uv that group **fails rather than skips**.
 
 ```bash
-npm test                 # engine、難度分級、閃卡、UI 接線、娛樂性強化、錯題再戰、院內清單、起始頁資訊層級、資料管線與 SW 界線（630 項）
-npm run build:pool       # 抓取來源 → data/pool.json
-npm run fetch:images     # 鏡像圖片 → data/img/*.webp（需 uv）
-npm run verify           # 資料完整性驗證
-npm run icons            # 由 icon.svg 幾何重繪 PWA 圖示（需 uv）
+npm test                 # engine, difficulty levels, flashcards, UI wiring, engagement, retry mistakes, hospital list, start-page IA, data pipeline and SW boundary (630 tests)
+npm run build:pool       # fetch source → data/pool.json
+npm run fetch:images     # mirror images → data/img/*.webp (needs uv)
+npm run verify           # data integrity checks
+npm run icons            # redraw PWA icons from icon.svg geometry (needs uv)
 ```
 
-本機預覽需經 HTTP（ES module 與 fetch 不支援 `file://`）：
+Local preview must go through HTTP (ES modules and fetch don't work over `file://`):
 
 ```bash
 python -m http.server 8000
 ```
 
-## 架構
+## Architecture
 
 ```
-engine.js                     純函式：正規化、判定、抽題、選項生成、計分、狀態機、閃卡（有測試）
-formulary.js                  純函式：藥證字號正規化、連結編碼（wire format v1）、四分類、級別可用性
-app.js                        DOM 與事件、資源失敗處理、成績卡繪製、院內清單載入與產連結
-index.html                    單檔內嵌樣式
-sw.js                         Service Worker：只快取 app shell（見下）
-data/pool.json                存活品項（可出題的題庫）
-data/excluded.json            被淘汰品項與其淘汰階段，供未命中分類用
-tools/build-pool.mjs          資料管線（Node，import engine.js 共用正規化）
-tools/fetch-images.py         圖片鏡像轉檔（uv + Pillow）
-tools/make-icons.py           由 icon.svg 幾何重繪 PWA 圖示（uv + Pillow）
-tools/verify-data.mjs         資料完整性驗證
-tests/gold-set.json           47 筆人工確認的品名 → 答案鍵對照
-tests/_ui-harness.mjs         最小 DOM 樁（刻意不引入 jsdom）
-tests/fetch_images_probe.py   fetch-images.py 的行為探針（真 Pillow；由 fetch-images.test.mjs 驅動）
-.ai-review/plan.md            規格 v3（資料管線與 L3）
-.ai-review/plan-v3-levels.md  規格 v3.6（難度分級），含驗收條件與歷次修訂的理由
-.ai-review/plan-v4-engagement.md  規格 v4.7（連對／稱號／最佳紀錄／動畫／錯題再戰，含驗收條件與歷次修訂的理由）
-.ai-review/plan-v5-formulary.md   規格 v5.11（院內清單客製化），含 wire format 契約與驗收條件
-.ai-review/golden-vectors-v1.md   連結編碼的 golden vectors（在 codec 實作**之前**人工推導產出）
-.ai-review/C51-manual.md          375px 人工留檔的矩陣與執行結果
-.ai-review/v51-start-ia.md        起始頁資訊層級重排的取捨、人工留檔與一項待處理的既有缺陷
-.ai-review/verdict-*.md       歷次獨立覆審的逐項判定
+engine.js                     Pure functions: normalization, judging, sampling, option generation, scoring, state machine, flashcards (tested)
+formulary.js                  Pure functions: license-number normalization, link encoding (wire format v1), four-way classification, level availability
+app.js                        DOM and events, resource-failure handling, score-card drawing, hospital-list loading and link generation
+index.html                    Single file with inline styles
+sw.js                         Service worker: caches the app shell only (see below)
+data/pool.json                Surviving items (the question pool)
+data/excluded.json            Excluded items and the stage that excluded them, for unmatched-item classification
+tools/build-pool.mjs          Data pipeline (Node; imports engine.js to share normalization)
+tools/fetch-images.py         Image mirroring and conversion (uv + Pillow)
+tools/make-icons.py           Redraws PWA icons from icon.svg geometry (uv + Pillow)
+tools/verify-data.mjs         Data integrity checks
+tests/gold-set.json           47 manually confirmed name → answer-key mappings
+tests/_ui-harness.mjs         Minimal DOM stub (jsdom deliberately not used)
+tests/fetch_images_probe.py   Behavior probe for fetch-images.py (real Pillow; driven by fetch-images.test.mjs)
+.ai-review/plan.md            Spec v3 (data pipeline and L3)
+.ai-review/plan-v3-levels.md  Spec v3.6 (difficulty levels), with acceptance criteria and reasons for each revision
+.ai-review/plan-v4-engagement.md  Spec v4.7 (streaks / titles / best records / animation / retry mistakes, with acceptance criteria and revision reasons)
+.ai-review/plan-v5-formulary.md   Spec v5.11 (hospital formulary customization), with wire-format contract and acceptance criteria
+.ai-review/golden-vectors-v1.md   Golden vectors for link encoding (derived by hand **before** the codec was implemented)
+.ai-review/C51-manual.md          Matrix and results of the 375px manual record
+.ai-review/v51-start-ia.md        Trade-offs of the start-page IA reordering, manual record and one outstanding existing defect
+.ai-review/verdict-*.md       Item-by-item verdicts of each independent review
 ```
 
-所有判定、抽題與計分都在 `engine.js`，`app.js` 只負責「怎麼畫」與「怎麼收作答」。
-資料管線刻意用 Node 而非 Python，就是為了與前端共用同一份 `normalize()`——
-兩份實作必然漂移，而漂移的後果是答案判定不一致。
+All judging, sampling and scoring live in `engine.js`; `app.js` only handles "how to draw" and "how to collect answers".
+The data pipeline deliberately uses Node rather than Python so it shares the same `normalize()` with the frontend —
+two implementations will inevitably drift, and drift means inconsistent answer judging.
 
-圖片鏡像進 repo 而非外連，有三個獨立理由：原圖 140KB–6MB、
-圖檔主機無 CORS（跨域圖片進 canvas 會 taint，成績卡截圖會失敗）、
-以及避免每位使用者都去打食藥署主機。轉 WebP 後約 27 倍壓縮。
+Images are mirrored into the repo rather than hot-linked for three independent reasons: originals are 140 KB–6 MB,
+the image host has no CORS (cross-origin images taint the canvas and score-card capture fails),
+and it avoids every user hitting the TFDA server. Converting to WebP gives roughly 27× compression.
 
-## PWA：可安裝，但不宣稱離線
+## PWA: installable, but not claimed to work offline
 
-可以「加到主畫面」當 app 用，但**題庫與藥品圖片永遠不進快取**，離線時開得起來卻載不到題目，
-會顯示「無法連線讀取題庫」。這是刻意的降級，不是壞掉，manifest 的說明也寫明「需連網使用」。
+You can "Add to Home Screen" and use it as an app, but **the question pool and drug images are never cached**; offline it opens but can't load questions
+and shows "cannot connect to load the question pool". This is a deliberate degradation, not a bug; the manifest description also says "requires a connection".
 
-兩個理由，任一個都足以否決離線：
+Two reasons, either sufficient to rule out offline:
 
-1. 要離線可作答就得預載全部圖片（約 50MB），與「首屏 <3MB」直接衝突
-2. 快取圖片會製造「新題庫配舊圖片」的版本錯配——顯示 A 藥的照片、標成 B 藥的名字。
-   那正是本工具最怕的失效模式
+1. Offline answering would require preloading all images (~50 MB), directly conflicting with "first screen < 3 MB"
+2. Caching images creates "new pool with old images" version mismatches — a photo of drug A labelled with drug B's name.
+   That is exactly the failure mode this tool fears most
 
-因此 `sw.js` 對 `data/` 底下的請求**連 `respondWith` 都不呼叫**，行為與沒有 Service Worker 時完全一致；
-其餘 app shell 走 network-first，快取只作為離線兜底。這條界線由 `tests/sw.test.mjs` 守著——
-測試會真的把 `sw.js` 載進受控的假 SW 環境驅動它的 fetch handler，不是比對原始碼字串。
+So `sw.js` **doesn't even call `respondWith`** for requests under `data/`, behaving exactly as if there were no service worker;
+the rest of the app shell is network-first, with the cache only as an offline fallback. This boundary is guarded by `tests/sw.test.mjs` —
+the test actually loads `sw.js` into a controlled fake SW environment and drives its fetch handler, rather than matching source strings.
 
-## 授權
+## License
 
-**程式碼採 [MIT](LICENSE)。`data/` 底下的題庫與圖片不在該授權範圍內。**
+**Code is under [MIT](LICENSE). The question pool and images under `data/` are not covered by that license.**
 
-那些檔案衍生自食藥署的「藥品外觀資料集」，本專案只是鏡像與重新編碼，
-**不對它們主張任何權利**——把 MIT 蓋在整個 repo 上，等於宣稱自己有權授權
-別人的藥品照片與資料集，而那不是事實。要重用 `data/` 的內容，
-請自行向資料提供機關確認授權條件（見 LICENSE 的第二段）。
+Those files are derived from the TFDA "Drug Appearance Dataset"; this project only mirrors and re-encodes them and
+**claims no rights to them** — stamping MIT on the whole repo would claim the right to license
+someone else's drug photos and dataset, which is not true. To reuse the contents of `data/`,
+confirm the licensing terms with the data provider yourself (see the second paragraph of LICENSE).
 
-## 資料來源與免責
+## Data Source and Disclaimer
 
-題庫來源：衛生福利部食品藥物管理署「藥品外觀資料集」（opendata 42）。
+Question source: Taiwan Ministry of Health and Welfare, Food and Drug Administration, "Drug Appearance Dataset" (opendata 42).
 
-本工具為藥學教育／自我練習用，**非臨床調劑或給藥的辨識依據**。
-實務辨識藥品請以原廠包裝、標籤與院內藥品品項資料為準。
-題庫為特定時間點之快照，不代表藥品現行供應或許可狀態。
+This tool is for pharmacy education and self-practice, **not a basis for identifying drugs in clinical dispensing or administration**.
+In practice, identify drugs by the original packaging, labels and your hospital's formulary data.
+The question pool is a snapshot at a point in time and does not reflect current drug supply or license status.
