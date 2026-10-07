@@ -212,6 +212,45 @@ def test_verify_asset(mod, root: Path, keep: Path | None) -> None:
         (keep / "corrupt.webp").write_bytes(bad.read_bytes())
 
 
+# ── B9 孤兒資產清除 ───────────────────────────────────────────────────
+
+def test_prune_orphans(mod, root: Path) -> None:
+    mod.ROOT = root
+    img_dir = root / "data" / "img"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("keep1.webp", "keep2.webp", "orphan1.webp", "orphan2.webp"):
+        (img_dir / name).write_bytes(make_webp())
+    (img_dir / "notes.txt").write_text("非 webp 不得被動到", encoding="utf-8")
+    items = [{"id": "K1", "img": "img/keep1.webp"}, {"id": "K2", "img": "img/keep2.webp"}]
+
+    assert mod.prune_orphans(items) == ["orphan1.webp", "orphan2.webp"]
+    left = sorted(f.name for f in img_dir.iterdir())
+    assert left == ["keep1.webp", "keep2.webp", "notes.txt"], f"清除範圍錯誤：{left}"
+    ok("prune_orphans 只刪未被引用的 webp，其餘保留")
+
+    assert mod.prune_orphans(items) == [], "第二次執行仍回報刪除 → 不冪等"
+    ok("prune_orphans 無孤兒 → 不刪任何檔")
+
+    try:
+        mod.prune_orphans([])
+    except ValueError:
+        assert sorted(f.name for f in img_dir.iterdir()) == left, "拒絕執行前已刪檔"
+        ok("prune_orphans 空 pool → 拒絕執行（防止刪光資產）")
+    else:
+        raise AssertionError("空 pool 未拒絕——每張圖都會被當成孤兒刪掉")
+
+
+def test_prune_before_early_return() -> None:
+    src = (REPO / "tools" / "fetch-images.py").read_text(encoding="utf-8")
+    main_src = src[src.index("def main()"):]
+    prune = main_src.index("prune_orphans(payload[\"items\"])")
+    early = main_src.index("if not todo:")
+    assert prune < early, (
+        "孤兒清除排在「無待處理項目」早退之後——只刪題不加題的月份不會清孤兒，"
+        "verify-data B9 照樣失敗（#24）")
+    ok("B9 孤兒清除排在無待處理早退之前")
+
+
 # ── CR-1 寫回排序（靜態）──────────────────────────────────────────────
 
 def test_write_order() -> None:
@@ -238,9 +277,11 @@ def main() -> int:
             test_needs_fetch(mod, root)
             test_process_routing(mod, root)
             test_verify_asset(mod, root, args.keep)
+            test_prune_orphans(mod, root / "prune")
         finally:
             mod.ROOT = real_root
     test_write_order()
+    test_prune_before_early_return()
 
     print(f"\n{len(cases)} 項全部通過", flush=True)
     return 0

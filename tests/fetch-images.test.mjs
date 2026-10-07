@@ -34,6 +34,10 @@ const REQUIRED_CASES = [
   '損毀檔的容器結構仍然合法',
   'verify_asset 位元流損毀 → 拋出',
   'CR-1 容量檢查排在 pool.json 回寫之前',
+  'prune_orphans 只刪未被引用的 webp',
+  'prune_orphans 無孤兒 → 不刪任何檔',
+  'prune_orphans 空 pool → 拒絕執行',
+  'B9 孤兒清除排在無待處理早退之前',
 ];
 
 /**
