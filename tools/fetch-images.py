@@ -131,6 +131,28 @@ def needs_fetch(item: dict, verify_all: bool = False) -> bool:
     return not is_sha256(item.get("src_sha256"))
 
 
+def prune_orphans(items: list[dict]) -> list[str]:
+    """
+    刪除 data/img/ 中未被任何題目引用的 WebP，回傳被刪的檔名（規格 B9）。
+
+    B9 原文「孤兒資產於發布時刪除」，verify-data.mjs 只負責擋，刪除卻從未實作——
+    只要來源移除一題，那張圖就永遠留著，排程每月在驗證步驟失敗（2026-10-01，#24）。
+    「引用」的判準與 verify-data.mjs 相同：`path.basename(item.img)`。
+
+    母體為空時拒絕執行：空 pool 下每張圖都是孤兒，等於清空整個資產目錄。
+    """
+    if not items:
+        raise ValueError("pool 無任何題目，拒絕清除孤兒資產（會刪光 data/img/）")
+    img_dir = ROOT / "data" / "img"
+    if not img_dir.exists():
+        return []
+    referenced = {Path(i["img"]).name for i in items}
+    removed = sorted(f.name for f in img_dir.glob("*.webp") if f.name not in referenced)
+    for name in removed:
+        (img_dir / name).unlink()
+    return removed
+
+
 def process(item: dict, verify_all: bool) -> tuple[str, str | None, str | None]:
     """回傳 (id, src_sha256, error)。已存在且雜湊已知時跳過。"""
     dest = ROOT / "data" / item["img"]
@@ -168,6 +190,14 @@ def main() -> int:
 
     payload = json.loads(POOL.read_text(encoding="utf-8"))
     items = payload["items"]
+
+    # 〔B9〕必須在「無待處理項目」早退之前：只有刪題、沒有新題的月份照樣會產生孤兒。
+    # 以完整 pool 為準（不受 --limit 影響）。中途失敗時 CI 不 commit，本機可由 git 還原
+    removed = prune_orphans(payload["items"])
+    if removed:
+        log(f"清除孤兒資產 {len(removed):,} 張：{', '.join(removed[:5])}"
+            f"{'…' if len(removed) > 5 else ''}")
+
     if args.limit:
         items = items[: args.limit]
 
