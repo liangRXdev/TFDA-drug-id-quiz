@@ -38,6 +38,10 @@ const REQUIRED_CASES = [
   'prune_orphans 無孤兒 → 不刪任何檔',
   'prune_orphans 空 pool → 拒絕執行',
   'B9 孤兒清除排在無待處理早退之前',
+  'download 完整讀取',
+  'download 中途斷線 → 逐次列出已讀／應有、耗時、錯誤型別',
+  'download 靜默截斷',
+  'download 非 200',
 ];
 
 /**

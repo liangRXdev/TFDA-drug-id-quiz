@@ -212,6 +212,74 @@ def test_verify_asset(mod, root: Path, keep: Path | None) -> None:
         (keep / "corrupt.webp").write_bytes(bad.read_bytes())
 
 
+# ── download 診斷訊息 ─────────────────────────────────────────────────
+
+class FakeResp:
+    def __init__(self, status=200, chunks=(), length=None, die_after=None):
+        self.status_code = status
+        self.headers = {} if length is None else {"Content-Length": str(length)}
+        self._chunks, self._die = list(chunks), die_after
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def iter_content(self, chunk_size):
+        for n, c in enumerate(self._chunks):
+            if self._die is not None and n == self._die:
+                raise ConnectionError("Connection broken: IncompleteRead")
+            yield c
+
+
+def test_download_diagnostics(mod) -> None:
+    real_get = mod.requests.get
+    MB = b"x" * (1024 * 1024)
+    try:
+        mod.requests.get = lambda *a, **k: FakeResp(chunks=[MB, MB], length=2 * len(MB))
+        assert mod.download("u") == MB + MB
+        ok("download 完整讀取 → 回傳全部位元組")
+
+        calls = []
+        def dying(*a, **k):
+            calls.append(k)
+            return FakeResp(chunks=[MB] * 5, length=5 * len(MB), die_after=3)
+        mod.requests.get = dying
+        try:
+            mod.download("u")
+        except RuntimeError as e:
+            msg = str(e)
+        else:
+            raise AssertionError("中途斷線卻回傳成功")
+        assert len(calls) == mod.RETRIES, f"重試次數 {len(calls)} ≠ {mod.RETRIES}"
+        assert all(k.get("stream") is True for k in calls), "未以串流下載，斷線時無從得知已讀量"
+        for n in range(1, mod.RETRIES + 1):
+            assert f"第 {n} 次 3.0MB/5.0MB" in msg, f"缺第 {n} 次的已讀／應有：{msg}"
+        assert "ConnectionError" in msg and "s ConnectionError" in msg, f"缺耗時或錯誤型別：{msg}"
+        ok("download 中途斷線 → 逐次列出已讀／應有、耗時、錯誤型別")
+
+        mod.requests.get = lambda *a, **k: FakeResp(chunks=[MB], length=2 * len(MB))
+        try:
+            mod.download("u")
+        except RuntimeError as e:
+            assert "長度不符" in str(e), str(e)
+            ok("download 靜默截斷（無例外但短於 Content-Length）→ 失敗")
+        else:
+            raise AssertionError("短於 Content-Length 卻回傳成功——截斷的圖會被寫進資產")
+
+        mod.requests.get = lambda *a, **k: FakeResp(status=500)
+        try:
+            mod.download("u")
+        except RuntimeError as e:
+            assert "HTTP 500" in str(e), str(e)
+            ok("download 非 200 → 失敗並帶狀態碼")
+        else:
+            raise AssertionError("HTTP 500 卻回傳成功")
+    finally:
+        mod.requests.get = real_get
+
+
 # ── B9 孤兒資產清除 ───────────────────────────────────────────────────
 
 def test_prune_orphans(mod, root: Path) -> None:
@@ -278,6 +346,7 @@ def main() -> int:
             test_process_routing(mod, root)
             test_verify_asset(mod, root, args.keep)
             test_prune_orphans(mod, root / "prune")
+            test_download_diagnostics(mod)
         finally:
             mod.ROOT = real_root
     test_write_order()

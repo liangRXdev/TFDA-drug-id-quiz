@@ -35,6 +35,7 @@ import json
 import re
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -72,20 +73,43 @@ def log(msg: str) -> None:
         print(msg, flush=True)
 
 
+def _mb(n: int | None) -> str:
+    return "?" if n is None else f"{n / 1024 / 1024:.1f}MB"
+
+
 def download(url: str) -> bytes:
-    """下載原圖，重試 RETRIES 次。全部失敗則拋出。"""
-    last = None
+    """
+    下載原圖，重試 RETRIES 次。全部失敗則拋出，訊息逐次列出「已讀／應有、耗時、錯誤」。
+
+    〔診斷〕2026-10-07 一張 34MB 原圖在 runner 上兩輪都斷在 10–13MB，本機三次皆完整
+    （31–88 秒）。推論是 runner 到 TFDA 的連線約在固定秒數被切斷，但原本的訊息只有
+    最後一次的例外，看不到每次撐了多久。TFDA 不支援 Range（帶 Range 仍回 200 全檔），
+    所以斷了只能從頭重抓，不能續傳。
+    """
+    attempts: list[str] = []
     for attempt in range(1, RETRIES + 1):
+        got, expected = 0, None
+        t0 = time.monotonic()
         try:
-            r = requests.get(url, timeout=TIMEOUT, headers={"User-Agent": UA})
-            if r.status_code != 200:
-                raise RuntimeError(f"HTTP {r.status_code}")
-            if not r.content:
+            with requests.get(url, timeout=TIMEOUT, headers={"User-Agent": UA},
+                              stream=True) as r:
+                if r.status_code != 200:
+                    raise RuntimeError(f"HTTP {r.status_code}")
+                cl = r.headers.get("Content-Length")
+                expected = int(cl) if cl and cl.isdigit() else None
+                buf = bytearray()
+                for chunk in r.iter_content(chunk_size=256 * 1024):
+                    buf += chunk
+                    got = len(buf)
+            if not buf:
                 raise RuntimeError("空回應")
-            return r.content
+            if expected is not None and got != expected:
+                raise RuntimeError(f"長度不符（Content-Length {expected}）")
+            return bytes(buf)
         except Exception as e:  # noqa: BLE001 — 任何失敗都要重試
-            last = e
-    raise RuntimeError(f"重試 {RETRIES} 次仍失敗：{last}")
+            attempts.append(f"第 {attempt} 次 {_mb(got)}/{_mb(expected)} "
+                            f"{time.monotonic() - t0:.0f}s {type(e).__name__}: {e}")
+    raise RuntimeError(f"重試 {RETRIES} 次仍失敗：" + "；".join(attempts))
 
 
 def to_webp(raw: bytes) -> bytes:
