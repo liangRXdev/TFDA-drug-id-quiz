@@ -379,6 +379,8 @@ function sourceRows({ keep = 6, filler = 5200 } = {}) {
       外觀圖檔連結: `https://example.invalid/f${i}.jpg`,
       形狀: '注射劑',                  // ← Q1 濾掉
       顏色: '無色', 刻痕: '無', 標註一: `F${i}`,
+      // 必備欄位以首列判定（pickDataFile），填充列也要有——空值照實際來源寫空字串
+      中文品名: `填充注射劑 ${i}`, 標註二: '', 外觀尺寸: '',
     });
   }
   const NAMES = ['ALFATIN', 'BRAVOZOL', 'CHARLIDINE', 'DELTAMOX', 'ECHOPRIL', 'FOXTROLOL'];
@@ -455,6 +457,22 @@ describe('TG-1 source_version 真的寫進產物（端到端）', () => {
     const timeish = Object.keys(a.meta).filter((k) => /time|generated|updated_at/i.test(k));
     assert.deepEqual(timeish, [], `meta 含執行時間欄位：${timeish.join(', ')}`);
   });
+});
+
+describe('B2 必備欄位涵蓋 Q5 判別鍵與題目顯示欄位', () => {
+  // 〔堵〕REQUIRED_FIELDS 只列 7 欄：來源若改名或拿掉「標註二」「外觀尺寸」，
+  //       Q5 的判別鍵靜默少一維（String(undefined ?? '') → ''），外觀不可區分的群組
+  //       被當成可區分而發布；拿掉「中文品名」則 L1 選項與檢討頁的中文全部變空白。
+  //       兩者都不會有任何錯誤訊息——schema 漂移必須在入口就中止
+  for (const field of ['中文品名', '標註二', '外觀尺寸']) {
+    test(`來源缺「${field}」→ exit 1，產物不寫出`, () => {
+      const rows = sourceRows().map(({ [field]: _drop, ...r }) => r);
+      const { error, poolRaw } = runPair(zipOf(rows));
+      assert.ok(error, `缺「${field}」卻照樣發布`);
+      assert.match(error, /schema|缺欄位/);
+      assert.equal(poolRaw, null);
+    });
+  }
 });
 
 describe('M1 squash 雙胞胎：端到端（真的跑 build-pool）', () => {
@@ -577,7 +595,7 @@ function runPair(zip, { seedFiles = null } = {}) {
 /** 每個 Q stage 各一筆已知 id ＋ 已知 survivor，其餘用 filler 撐過 5,000 列下限 */
 function stageRows() {
   const rows = sourceRows({ keep: 4, filler: 5200 });
-  const base = { 顏色: '白色', 刻痕: '無', 外觀尺寸: '9mm', 標註二: '' };
+  const base = { 顏色: '白色', 刻痕: '無', 外觀尺寸: '9mm', 標註二: '', 中文品名: '階段測試錠' };
   rows.push(
     // Q1：形狀非固體口服
     { ...base, 許可證字號: '衛署藥製字第900001號', 英文品名: 'STAGEONE SYRUP', 形狀: '液劑(包含糖漿用粉劑)',
