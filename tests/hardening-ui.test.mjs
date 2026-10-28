@@ -145,3 +145,18 @@ describe('M3 外觀特徵與題庫 meta 一律跳脫後才進 innerHTML', () => 
     for (const evil of [EVIL1, EVIL2]) assert.deepEqual(htmlTainted(evil), []);
   });
 });
+
+describe('startQuiz 的錯誤分支不得引用未定義識別字', () => {
+  test('INSUFFICIENT_KEYS 訊息用的是卷長 len，不是不存在的 n（靜態）', () => {
+    // 證據層級：靜態原始碼契約。通用版的這條分支在 UI 上到不了——
+    // `lenOff()` 以同一個 eligible 集合做算術收斂，先擋下了；它是縱深防禦。
+    // 但真的走到時 `${n}` 會在 catch 內拋 ReferenceError，使用者只看到一片空白
+    const src = fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8');
+    const start = src.indexOf('function startQuiz()');
+    const body = src.slice(start, src.indexOf('\nfunction ', start + 1));
+    assert.ok(body.includes("e.code === 'INSUFFICIENT_KEYS'"), '找不到目標分支，這條已沒打中');
+    const exprs = [...body.matchAll(/\$\{([^}]*)\}/g)].map((m) => m[1]);
+    assert.deepEqual(exprs.filter((x) => /(^|[^.\w])n([^\w]|$)/.test(x)), [],
+      'startQuiz 的樣板字串引用了未宣告的 n');
+  });
+});

@@ -1374,7 +1374,7 @@ function startQuiz() {
       }
       if (e.code === 'INSUFFICIENT_KEYS') {
         return fatal(`${LEVELS[level].badge}可用答案鍵僅 ${e.available} 個，`
-          + `不足 ${e.required ?? n} 個，無法出 ${n} 題。`);
+          + `不足 ${e.required ?? len} 個，無法出 ${len} 題。`);
       }
       if (e.code === 'INVARIANT_VIOLATED') {
         // 生成路徑違規是程式 bug，不是題庫問題——不要建議使用者改選難度
