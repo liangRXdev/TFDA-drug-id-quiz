@@ -125,52 +125,90 @@ describe('editDistance', () => {
 // ── A4 — 全題庫零誤接受 ───────────────────────────────────────────────
 
 describe('A4 — 跨答案鍵誤接受', () => {
-  /** 找出所有編輯距離 ≤1 的相異答案鍵對（長度分桶加速） */
-  const collidingPairs = (keys) => {
+  /**
+   * 找出所有 `[正解 b, 輸入 a]` 且編輯距離 ≤1 的相異答案鍵對（長度分桶加速）。
+   *
+   * **只有正解側受 FUZZY_MIN_LEN 限制，輸入側必須涵蓋全部鍵。**
+   * 原本兩側一起過濾（`keys.filter(len >= 6)` 後才分桶），長度 5 的鄰居從未被比對：
+   * 正解 SURING、輸入 SURIN 判為正確——打成另一顆藥的名字卻得分（實測 18 組）。
+   */
+  const collidingPairs = (allKeys) => {
     const byLen = new Map();
-    for (const k of keys) {
+    for (const k of allKeys) {
       if (!byLen.has(k.length)) byLen.set(k.length, []);
       byLen.get(k.length).push(k);
     }
     const pairs = [];
-    for (const k of keys) {
-      for (const L of [k.length - 1, k.length, k.length + 1]) {
-        for (const other of byLen.get(L) || []) {
-          if (other === k) continue;
-          if (editDistance(k, other, 1) <= 1) pairs.push([k, other]);
+    for (const b of allKeys) {
+      if (b.length < FUZZY_MIN_LEN) continue;            // 短正解本來就不容錯
+      for (const L of [b.length - 1, b.length, b.length + 1]) {
+        for (const a of byLen.get(L) || []) {
+          if (a === b) continue;
+          if (editDistance(b, a, 1) <= 1) pairs.push([b, a]);
         }
       }
     }
     return pairs;
   };
+  const allKeys = () => [...new Set(POOL.items.map((i) => squash(i.ans)))];
 
   test('題庫確實存在僅差 1 字元的相異藥名（停用清單有其必要）', () => {
     assert.ok(POOL, 'data/pool.json 不存在，請先執行 npm run build:pool');
-    const keys = [...new Set(POOL.items.map((i) => squash(i.ans)))].filter((k) => k.length >= FUZZY_MIN_LEN);
-    assert.ok(collidingPairs(keys).length > 0,
+    assert.ok(collidingPairs(allKeys()).length > 0,
       '若此斷言失敗，代表題庫已無相近藥名，可考慮簡化 no_fuzzy 機制');
   });
 
-  test('停用清單涵蓋全部碰撞鍵', () => {
+  test('停用清單涵蓋全部碰撞的正解鍵（含鄰居長度 < FUZZY_MIN_LEN）', () => {
     assert.ok(POOL?.meta?.no_fuzzy, 'pool.meta.no_fuzzy 不存在，請重建題庫');
     const nf = new Set(POOL.meta.no_fuzzy);
-    const keys = [...new Set(POOL.items.map((i) => squash(i.ans)))].filter((k) => k.length >= FUZZY_MIN_LEN);
-    const uncovered = [...new Set(collidingPairs(keys).flat())].filter((k) => !nf.has(k));
+    const uncovered = [...new Set(collidingPairs(allKeys()).map(([b]) => b))].filter((k) => !nf.has(k));
     assert.equal(uncovered.length, 0,
       `${uncovered.length} 個碰撞鍵未被停用：${uncovered.slice(0, 10).join(', ')}`);
+  });
+
+  test('〔回歸〕長度 5 的鄰居必須被比對：SURIN 不得被判為 SURING', () => {
+    assert.ok(POOL?.meta?.no_fuzzy);
+    const nf = new Set(POOL.meta.no_fuzzy);
+    const keys = new Set(allKeys());
+    // 只驗題庫裡確實兩者都在的對；題庫更新使某一方消失時，這組不再是碰撞
+    const cases = [['SURING', 'SURIN'], ['DOMPER', 'DOMPE'], ['AMOTEN', 'MOTEN'], ['ANTONE', 'ANTON'],
+      ['ESOMIN', 'SOMIN'], ['TOPLAX', 'TOLAX'], ['ECPRAM', 'EPRAM']].filter(([b, a]) => keys.has(b) && keys.has(a));
+    assert.ok(cases.length > 0, '回歸案例已全數不在題庫中，請改用新的實例');
+    for (const [b, a] of cases) {
+      assert.ok(nf.has(b), `${b} 應在 no_fuzzy（鄰居 ${a} 長度 ${a.length}）`);
+      assert.equal(judge(a, b, { noFuzzy: nf.has(b) }).correct, false, `正解 ${b} 卻接受了 ${a}`);
+    }
   });
 
   test('★ 套用停用清單後，跨相異答案鍵誤接受數 = 0', () => {
     assert.ok(POOL?.meta?.no_fuzzy);
     const nf = new Set(POOL.meta.no_fuzzy);
-    const keys = [...new Set(POOL.items.map((i) => squash(i.ans)))].filter((k) => k.length >= FUZZY_MIN_LEN);
-    // 對每組碰撞：使用者打成 b、正解為 a，套用該題的 noFuzzy 後必須判錯
-    const falseAccepts = collidingPairs(keys).filter(
-      ([a, b]) => judge(b, a, { noFuzzy: nf.has(a) }).correct
+    // 對每組碰撞：正解為 b、使用者打成 a，套用該題的 noFuzzy 後必須判錯
+    const falseAccepts = collidingPairs(allKeys()).filter(
+      ([b, a]) => judge(a, b, { noFuzzy: nf.has(b) }).correct
     );
     assert.equal(falseAccepts.length, 0,
       `仍有 ${falseAccepts.length} 組誤接受：\n` +
-        falseAccepts.slice(0, 10).map(([a, b]) => `  正解 ${a} 卻接受了 ${b}`).join('\n'));
+        falseAccepts.slice(0, 10).map(([b, a]) => `  正解 ${b} 卻接受了 ${a}`).join('\n'));
+  });
+
+  test('★ 全量窮舉：任一不在 no_fuzzy 的長鍵 b，任何其他鍵 a 都不得被 judge(a, b) 接受', () => {
+    // 〔堵〕上面三條都經過 collidingPairs 的分桶與 editDistance 預篩——
+    //       預篩本身寫錯（正是 H1 那種「先過濾再比對」）時，它們會跟著一起綠。
+    //       這條不做任何預篩，直接用 judge() 本身窮舉全部 N² 對，不重述判定邏輯
+    assert.ok(POOL?.meta?.no_fuzzy);
+    const nf = new Set(POOL.meta.no_fuzzy);
+    const keys = allKeys();
+    const falseAccepts = [];
+    for (const b of keys) {
+      if (b.length < FUZZY_MIN_LEN || nf.has(b)) continue;
+      for (const a of keys) {
+        if (a !== b && judge(a, b, { noFuzzy: false }).correct) falseAccepts.push([b, a]);
+      }
+    }
+    assert.equal(falseAccepts.length, 0,
+      `${falseAccepts.length} 組誤接受：\n` +
+        falseAccepts.slice(0, 20).map(([b, a]) => `  正解 ${b} 卻接受了 ${a}`).join('\n'));
   });
 
   test('停用清單不影響非碰撞藥名的容錯', () => {

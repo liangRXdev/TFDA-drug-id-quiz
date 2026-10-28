@@ -21,7 +21,9 @@ import zlib from 'node:zlib';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { ROOT } from './_ui-harness.mjs';
-import { dosDateToISO, carryHashes, isSha256, validatePair } from '../tools/build-pool.mjs';
+import {
+  dosDateToISO, carryHashes, isSha256, validatePair, computeNoFuzzy,
+} from '../tools/build-pool.mjs';
 import { PREFIX_TABLE } from '../formulary.js';
 
 // ══ SC-2 來源版本 ═════════════════════════════════════════════════════
@@ -180,6 +182,30 @@ describe('CR-3 isSha256：三處共用的格式判定', () => {
 });
 
 // ══ CR-2 解碼驗證的責任歸屬（靜態契約）═══════════════════════════════
+
+// ══ H1 容錯停用清單（規格 6.2）══════════════════════════════════════
+
+describe('H1 computeNoFuzzy：短鄰居也必須被比對', () => {
+  const items = (...ans) => ans.map((a) => ({ ans: a }));
+
+  test('長度 5 的鄰居會讓長度 6 的正解停用容錯（SURIN → SURING）', () => {
+    // 〔堵〕先 filter(len >= FUZZY_MIN_LEN) 再分桶：SURIN 不在桶裡，SURING 不被標記，
+    //       於是 judge('SURIN', 'SURING') 走容錯分支判為正確
+    assert.deepEqual(computeNoFuzzy(items('SURING', 'SURIN')), ['SURING']);
+  });
+
+  test('空白不影響：以 squash 後的鍵比對（EPRAM → EC PRAM）', () => {
+    assert.deepEqual(computeNoFuzzy(items('EC PRAM', 'EPRAM')), ['ECPRAM']);
+  });
+
+  test('兩側都夠長時兩側都標記；短鍵本身不列入（它本來就不容錯）', () => {
+    assert.deepEqual(computeNoFuzzy(items('SOLAXIN', 'BOLAXIN', 'ISAN', 'ISAM')), ['BOLAXIN', 'SOLAXIN']);
+  });
+
+  test('沒有鄰居的長鍵維持容錯', () => {
+    assert.deepEqual(computeNoFuzzy(items('PROPRANOLOL', 'ISOPTIN', 'ABC')), []);
+  });
+});
 
 describe('CR-2 「可解碼」的宣稱必須有對應的證據', () => {
   const FETCH = fs.readFileSync(path.join(ROOT, 'tools/fetch-images.py'), 'utf8');

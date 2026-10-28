@@ -329,9 +329,14 @@ function checkPrefixTable(rows) {
  * 實測題庫中有數百組僅差 1 字元的相異藥名（SOLAXIN⇄BOLAXIN、PISTON⇄POSTON…）。
  * 容錯開著會把「打成另一顆藥的名字」判為正確——正是威脅模型第一順位的「誤判為對」。
  * 寧可要求這些藥名必須完全拼對。
+ *
+ * **FUZZY_MIN_LEN 只限制「被判定的正解」那一側，比對對象必須是全部鍵。**
+ * 原本先 `filter(len >= FUZZY_MIN_LEN)` 才分桶，長度 5 的鄰居從未被比對：
+ * 正解 SURING、輸入 SURIN 判為正確（實測 18 組，DOMPE→DOMPER、EPRAM→EC PRAM…）。
+ * 短鍵本身不容錯，所以只標記長的那一側；兩側都夠長時各自當正解時都會被標到。
  */
-function computeNoFuzzy(items) {
-  const keys = [...new Set(items.map((i) => squash(i.ans)))].filter((k) => k.length >= FUZZY_MIN_LEN);
+export function computeNoFuzzy(items) {
+  const keys = [...new Set(items.map((i) => squash(i.ans)))];
   const byLen = new Map();
   for (const k of keys) {
     if (!byLen.has(k.length)) byLen.set(k.length, []);
@@ -339,11 +344,13 @@ function computeNoFuzzy(items) {
   }
   const flagged = new Set();
   for (const k of keys) {
+    if (k.length < FUZZY_MIN_LEN) continue;
     for (const L of [k.length - 1, k.length, k.length + 1]) {
       for (const other of byLen.get(L) || []) {
         if (other === k) continue;
-        if (editDistance(k, other, 1) <= 1) { flagged.add(k); flagged.add(other); }
+        if (editDistance(k, other, 1) <= 1) { flagged.add(k); break; }
       }
+      if (flagged.has(k)) break;
     }
   }
   return [...flagged].sort();
