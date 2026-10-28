@@ -196,7 +196,10 @@ describe('A11 名稱碰撞排除', () => {
     assert.equal(nameCollides('COLD', 'COLDAN'), true, '單向前綴');
     assert.equal(nameCollides('COLDAN', 'COLD'), true, '反向前綴');
     assert.equal(nameCollides('OLDAN', 'GOLDANX'), false, '中間包含但非前綴');
-    assert.equal(nameCollides('K MYCIN', 'KMYCIN'), false, '僅空白差異 → squash 後相等，由 H1 處理');
+    // 2026-10 改判（原為 false，「由 H1 處理」）：H1 比的是答案鍵**字面**，
+    // 去空白同名的相異答案鍵（SUMIN 適敏 ⇄ SU MIN 抒敏）兩邊都不管，會同題並列。
+    // 字面完全相同（距離 0）仍回 false，那才是 H1 的範圍
+    assert.equal(nameCollides('K MYCIN', 'KMYCIN'), true, '僅空白差異的相異答案鍵 → 視為名稱碰撞（D13 2026-10）');
     assert.equal(nameCollides('AB', 'AC'), true, '短名距離 1 也算碰撞');
   });
 
@@ -221,6 +224,71 @@ describe('A11 名稱碰撞排除', () => {
       const c = buildChoices(it, index(), { level: Level.L1, rng, excludeAns: new Set() });
       assertChoiceInvariants(c, it, Level.L1);
     }
+  });
+});
+
+// ══ D13（2026-10）— 去空白同名的相異答案鍵不得同題 ══════════════════════
+// 〔堵〕nameCollides 對 squash 相等回 false、交由 H1——但 H1 比字面，
+//       SUMIN／SU MIN、UCLOR／U CLOR 因此可同題並列（修正前 L2 以 UCLOR 為正解、
+//       300 seed 中 39 次帶出 U CLOR）。兩個幾乎看不出差別的名字並列，使用者只能猜
+describe('D13 squash 相等的相異答案鍵視為名稱碰撞', () => {
+  test('comparator：去空白同名但字面相異 → 碰撞；字面相同仍交 H1', () => {
+    assert.equal(nameCollides('SUMIN', 'SU MIN'), true);
+    assert.equal(nameCollides('SU MIN', 'SUMIN'), true, '對稱');
+    assert.equal(nameCollides('U CLOR', 'UCLOR'), true);
+    assert.equal(nameCollides('SUMIN', 'SUMIN'), false, '字面相同（距離 0）仍由 H1 處理');
+  });
+
+  test('真實題庫：雙胞胎任一方為正解時，另一方不得出現在選項或備援（L1／L2 各 300 seed）', () => {
+    need();
+    const TWINS = [['SUMIN', 'SU MIN'], ['UCLOR', 'U CLOR']];
+    const hits = [];
+    let probed = 0;
+    for (const level of [Level.L1, Level.L2]) {
+      const el = eligibleKeys(index(), level);
+      for (const [a, b] of TWINS) for (const [x, y] of [[a, b], [b, a]]) {
+        if (!el.has(x)) continue;
+        for (const rec of index().byAns.get(x)) for (let seed = 1; seed <= 300; seed++) {
+          const c = buildChoices(rec, index(), { level, rng: makeRng(seed), excludeAns: new Set() });
+          probed++;
+          if ([...c.options, ...c.spares].some((r) => r.ans === y)) hits.push(`${level} 正解 ${x} seed ${seed} 含 ${y}`);
+        }
+      }
+    }
+    assert.ok(probed > 0, '雙胞胎在題庫中都不可出題，這條什麼也沒驗到');
+    assert.deepEqual(hits.slice(0, 10), [], `共 ${hits.length} 次同題`);
+  });
+
+  // 誘答彼此（不經正解）也要擋：pickMutuallyValid 的兩兩檢查
+  const R = (ans, mark1) => ({ id: `${ans}-${mark1}`, ans, shape: ['圓形'], color: ['白'], mark1, mark2: null, img: `${ans}.webp` });
+  const CORRECT = R('ZYXWARE', 'Z0');
+  const TA = R('QUUXOL', 'T1');
+  const TB = R('QUU XOL', 'T2');
+  const fill = ['ALFATIN', 'BRAVOZOL', 'CHARLIDINE', 'DELTAMOX', 'ECHOPRIL'].map((a, i) => R(a, `F${i}`));
+
+  test('誘答彼此：同一題的 5 個誘答不得同時含兩個雙胞胎（合成 fixture，200 seed）', () => {
+    const idx = buildIndex([CORRECT, TA, TB, ...fill]);
+    const both = [];
+    for (let seed = 1; seed <= 200; seed++) {
+      const c = buildChoices(CORRECT, idx, { level: Level.L2, rng: makeRng(seed), excludeAns: new Set() });
+      const all = [...c.options, ...c.spares];
+      if (all.includes(TA) && all.includes(TB)) both.push(seed);
+    }
+    assert.deepEqual(both, [], `兩個雙胞胎同題的 seed：${both.slice(0, 10)}`);
+  });
+
+  test('validateQuizInvariants：選項或備援內有 squash 相等的相異 ans → 違規', () => {
+    const idx = buildIndex([CORRECT, TA, TB, ...fill]);
+    const mk = (options, spares) => newQuestion(CORRECT, {
+      token: 1, level: Level.L2, chance: CHANCE.FOUR, options, answerIdx: 0, spares,
+    });
+    const inOptions = validateQuizInvariants([mk([CORRECT, TA, TB, fill[0]], [fill[1], fill[2]])], { level: Level.L2, index: idx });
+    assert.ok(inOptions.some((m) => /QUUXOL/.test(m) && /QUU XOL/.test(m) && /去空白/.test(m)), JSON.stringify(inOptions));
+    const inSpares = validateQuizInvariants([mk([CORRECT, TA, fill[0], fill[1]], [TB, fill[2]])], { level: Level.L2, index: idx });
+    assert.ok(inSpares.some((m) => /去空白/.test(m)), `備援內的違規未被抓到：${JSON.stringify(inSpares)}`);
+    // 〔反向〕合法題不誤報
+    assert.deepEqual(validateQuizInvariants([mk([CORRECT, TA, fill[0], fill[1]], [fill[2], fill[3]])],
+      { level: Level.L2, index: idx }), []);
   });
 });
 

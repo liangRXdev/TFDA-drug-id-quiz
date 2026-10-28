@@ -356,13 +356,17 @@ export const CHANCE = {
 
 /**
  * D13：同題選項的名稱碰撞。
- * 比較輸入一律為 squash(答案鍵)，不再做其他前處理；
- * 完全相等交由 H1（答案鍵互異）處理，不重複計為前綴碰撞。
+ * 比較輸入一律為 squash(答案鍵)，不再做其他前處理。
+ *
+ * **squash 後相等時：字面不同即視為碰撞（2026-10 起）。** 原本一律回 false、
+ * 「交由 H1 處理」——但 H1 比的是答案鍵字面，去空白同名的相異答案鍵
+ * （SUMIN 適敏 ⇄ SU MIN 抒敏）兩邊都不管，會同題並列。
+ * 字面完全相同才是 H1 的範圍，仍回 false。
  */
 export function nameCollides(a, b) {
   const x = squash(a);
   const y = squash(b);
-  if (x === y) return false;
+  if (x === y) return a !== b;
   if (editDistance(x, y, 1) <= 1) return true;
   return x.startsWith(y) || y.startsWith(x);
 }
@@ -773,6 +777,9 @@ export function validateQuizInvariants(questions, { level, index } = {}) {
         const y = all[b];
         if (!y?.id) continue;
         if (x.ans === y.ans) bad.push(`[H1] ${at}：答案鍵 ${x.ans} 重複`);
+        // 明列、不經 nameCollides：去空白同名的相異答案鍵（D13 2026-10）。
+        // 驗證器不依賴受驗的 comparator，comparator 回歸時這條仍會抓到
+        else if (squash(x.ans) === squash(y.ans)) bad.push(`[H3] ${at}：${x.ans} 與 ${y.ans} 去空白後同名`);
         else if (nameCollides(x.ans, y.ans)) bad.push(`[H3] ${at}：${x.ans} 與 ${y.ans} 名稱過近`);
         if (lvl === Level.L2 && l2Key(x) === l2Key(y)) bad.push(`[D12] ${at}：${x.ans} 與 ${y.ans} 的 L2key 碰撞`);
       }
