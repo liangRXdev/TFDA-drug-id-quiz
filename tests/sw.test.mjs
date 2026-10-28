@@ -49,8 +49,12 @@ function loadSw({ existingCaches = ['tfda-drug-id-quiz-v1'], source } = {}) {
   };
 
   const fetched = [];
-  const fetchStub = async (req) => {
+  const inits = [];
+  const net = { offline: false };
+  const fetchStub = async (req, init) => {
     fetched.push(typeof req === 'string' ? req : req.url);
+    inits.push(init);
+    if (net.offline) throw new TypeError('Failed to fetch');
     return { ok: true, clone: () => ({ ok: true, cached: true }), url: req.url ?? req };
   };
 
@@ -58,7 +62,7 @@ function loadSw({ existingCaches = ['tfda-drug-id-quiz-v1'], source } = {}) {
   new Function('self', 'caches', 'fetch', 'URL', 'Error', src)(
     self, caches, fetchStub, URL, Error,
   );
-  return { listeners, store, fetched, caches, opened, deleted };
+  return { listeners, store, fetched, inits, net, caches, opened, deleted };
 }
 
 /** 驅動 fetch handler，回報 respondWith 是否被呼叫 */
@@ -130,6 +134,37 @@ describe('SW 快取界線：題庫與圖片永不進快取', () => {
     assert.ok(fetched.includes(`${ORIGIN}/app.js`), '網路優先：應先打網路');
   });
 
+  test('network-first 要繞過 HTTP 快取：fetch 帶 cache: no-cache', async () => {
+    // 〔堵〕fetch(req) 走預設 HTTP 快取：GitHub Pages 的 max-age 內拿到的是瀏覽器
+    //       HTTP 快取裡的舊 app.js，「網路優先」名不副實，新 pool 配舊程式會撞 schema
+    const { listeners, inits } = loadSw();
+    for (const u of ['app.js', 'index.html', '']) {
+      inits.length = 0;
+      await handleFetch(listeners, `${ORIGIN}/${u}`, { mode: u ? 'no-cors' : 'navigate' });
+      assert.equal(inits[0]?.cache, 'no-cache', `${u || '導覽'} 的 fetch 未帶 cache: 'no-cache'`);
+    }
+  });
+
+  test('導覽請求以去掉 query／fragment 的 key 存快取，離線時任何 query 都命中', async () => {
+    // 〔堵〕院內清單連結是 `?fx=…`，每份清單都不同：照原樣當 key，
+    //       每個連結各存一份、離線時換一份清單就全部 miss
+    const { listeners, store, net } = loadSw();
+    await handleFetch(listeners, `${ORIGIN}/quiz/?fx=AAA#x`, { mode: 'navigate' });
+    assert.ok(store.has(`${ORIGIN}/quiz/`), `導覽回應應存在去 query 的 key，實際 keys：${[...store.keys()]}`);
+    assert.ok(![...store.keys()].some((k) => k.includes('fx=')), '快取 key 不得帶 query');
+
+    net.offline = true;
+    const { result } = await handleFetch(listeners, `${ORIGIN}/quiz/?fx=BBB`, { mode: 'navigate' });
+    // 比對的是寫入時存下的那份回應，不是 index.html 兜底（兜底在 install 後也會給出東西）
+    assert.equal(result?.cached, true, '離線時不同 query 的導覽應命中同一份快取');
+  });
+
+  test('非導覽請求的快取 key 不改寫（query 是資源版本的一部分）', async () => {
+    const { listeners, store } = loadSw();
+    await handleFetch(listeners, `${ORIGIN}/app.js?v=2`);
+    assert.ok(store.has(`${ORIGIN}/app.js?v=2`));
+  });
+
   test('跨域請求（Google Fonts）不攔截', async () => {
     const { listeners } = loadSw();
     const { responded } = await handleFetch(listeners, 'https://fonts.gstatic.com/s/a.woff2');
@@ -156,8 +191,8 @@ describe('C31 每批交付無條件升 CACHE 版本', () => {
     const mc = /const CACHE = `\$\{PREFIX\}([^`]+)`/.exec(src);
     assert.ok(mp, 'sw.js 必須有 const PREFIX');
     assert.ok(mc, 'sw.js 的 CACHE 必須由 PREFIX 組出（前綴守衛靠這個關聯成立）');
-    assert.equal(mp[1] + mc[1], 'tfda-drug-id-quiz-v8',
-      '本批（大圖補種＋下載診斷）必須升到 v8');
+    assert.equal(mp[1] + mc[1], 'tfda-drug-id-quiz-v9',
+      '本批（2026-10 覆審修正）必須升到 v9');
   });
 
   test('〔v4.5〕cache 名稱由 install 實際使用的值取證，不只比對原始碼常數', async () => {
@@ -166,7 +201,7 @@ describe('C31 每批交付無條件升 CACHE 版本', () => {
     let done;
     listeners.install({ waitUntil: (p) => { done = p; } });
     await done;
-    assert.deepEqual(opened, ['tfda-drug-id-quiz-v8'],
+    assert.deepEqual(opened, ['tfda-drug-id-quiz-v9'],
       `install 實際開啟的 cache 名稱是 ${JSON.stringify(opened)}`);
   });
 

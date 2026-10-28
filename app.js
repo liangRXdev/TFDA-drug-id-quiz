@@ -72,6 +72,7 @@ const show = (el, on = true) => el.classList.toggle('hidden', !on);
 const state = {
   pool: null,
   noFuzzy: new Set(),
+  noSquash: new Set(),
   /**
    * **目前出題的品項集合**。通用版＝全庫；院內版＝命中子集（D36）。
    *
@@ -208,6 +209,7 @@ async function loadPool() {
   state.pool = data;
   state.keyCount = 0;
   state.noFuzzy = new Set(data.meta.no_fuzzy || []);
+  state.noSquash = new Set(data.meta.no_squash || []);
   state.items = data.items;
   state.index = buildIndex(data.items);
 
@@ -755,8 +757,9 @@ function fxMissingSentence() {
 function renderPoolInfo() {
   const m = state.pool?.meta;
   if (!m) return;
-  const src = ` ｜ <b>來源</b> ${m.source}`
-    + (m.source_file ? ` ｜ <b>檔案</b> <span class="num">${m.source_file}</span>` : '');
+  // meta 來自 pool.json，與品項欄位同屬資料——一律跳脫，不因「是我們自己產的」而例外
+  const src = ` ｜ <b>來源</b> ${escapeHtml(m.source)}`
+    + (m.source_file ? ` ｜ <b>檔案</b> <span class="num">${escapeHtml(m.source_file)}</span>` : '');
   // 收合狀態下的一行答案：「我現在用哪個題庫」不該要展開才看得到。
   // 院內版**不在這裡重印 N**——正上方的 `#startFxNote` 已經印了，
   // 同一個數字出現兩次會讓人開始比對兩者是不是同一件事
@@ -1371,7 +1374,7 @@ function startQuiz() {
       }
       if (e.code === 'INSUFFICIENT_KEYS') {
         return fatal(`${LEVELS[level].badge}可用答案鍵僅 ${e.available} 個，`
-          + `不足 ${e.required ?? n} 個，無法出 ${n} 題。`);
+          + `不足 ${e.required ?? len} 個，無法出 ${len} 題。`);
       }
       if (e.code === 'INVARIANT_VIOLATED') {
         // 生成路徑違規是程式 bug，不是題庫問題——不要建議使用者改選難度
@@ -1401,11 +1404,15 @@ function startQuiz() {
   renderQuestion();
 }
 
+/**
+ * `val` 是 TFDA 的原始欄位（標註一／二、外觀尺寸…），刻字欄位就是自由文字，
+ * 必須跳脫；`interp` 一併跳脫。`name` 只吃呼叫端的固定字面值。
+ */
 const featureCell = (name, val, interp) => `
   <div class="metric">
     <div class="name">${name}</div>
-    <div class="val">${val || '—'}</div>
-    ${interp ? `<div class="interp muted">${interp}</div>` : ''}
+    <div class="val">${escapeHtml(val || '—')}</div>
+    ${interp ? `<div class="interp muted">${escapeHtml(interp)}</div>` : ''}
   </div>`;
 
 const OPT_KEYS = ['A', 'B', 'C', 'D'];
@@ -1808,7 +1815,8 @@ function submit() {
   if (q.state === QState.LOCKED || q.state === QState.VOID) return;
 
   const raw = $('qInput').value;
-  const r = judge(raw, q.item.ans, { noFuzzy: state.noFuzzy.has(squash(q.item.ans)) });
+  const key = squash(q.item.ans);
+  const r = judge(raw, q.item.ans, { noFuzzy: state.noFuzzy.has(key), noSquash: state.noSquash.has(key) });
   if (r.reason === 'empty') {
     $('qInput').focus();
     return;                       // 空輸入不改變狀態，不算答錯（規格 6.1）

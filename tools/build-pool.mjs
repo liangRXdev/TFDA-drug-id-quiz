@@ -27,8 +27,16 @@ const SOLID_SHAPES = new Set([
   '六邊形', '八邊形', '水滴形', '雙圓形', '五邊形',
 ]);
 
-/** 資料檔必備欄位（用於 schema 辨識，非依檔名）— 規格 B2 */
-const REQUIRED_FIELDS = ['許可證字號', '英文品名', '外觀圖檔連結', '形狀', '顏色', '刻痕', '標註一'];
+/**
+ * 資料檔必備欄位（用於 schema 辨識，非依檔名）— 規格 B2
+ *
+ * 標註二、外觀尺寸是 Q5 判別鍵的兩維，中文品名是題目與檢討頁的顯示欄位。
+ * 讀取端一律 `?? ''`，缺欄位不會報錯，只會讓 Q5 靜默少一維、中文全變空白——
+ * 所以必須在入口就當成 schema 不符而中止。
+ */
+const REQUIRED_FIELDS = [
+  '許可證字號', '英文品名', '中文品名', '外觀圖檔連結', '形狀', '顏色', '刻痕', '標註一', '標註二', '外觀尺寸',
+];
 
 const MIN_SOURCE_ROWS = 5000;   // 規格 §5 步驟 4
 const MAX_DELTA_RATIO = 0.03;   // 規格 D9：±3%
@@ -329,9 +337,14 @@ function checkPrefixTable(rows) {
  * 實測題庫中有數百組僅差 1 字元的相異藥名（SOLAXIN⇄BOLAXIN、PISTON⇄POSTON…）。
  * 容錯開著會把「打成另一顆藥的名字」判為正確——正是威脅模型第一順位的「誤判為對」。
  * 寧可要求這些藥名必須完全拼對。
+ *
+ * **FUZZY_MIN_LEN 只限制「被判定的正解」那一側，比對對象必須是全部鍵。**
+ * 原本先 `filter(len >= FUZZY_MIN_LEN)` 才分桶，長度 5 的鄰居從未被比對：
+ * 正解 SURING、輸入 SURIN 判為正確（實測 18 組，DOMPE→DOMPER、EPRAM→EC PRAM…）。
+ * 短鍵本身不容錯，所以只標記長的那一側；兩側都夠長時各自當正解時都會被標到。
  */
-function computeNoFuzzy(items) {
-  const keys = [...new Set(items.map((i) => squash(i.ans)))].filter((k) => k.length >= FUZZY_MIN_LEN);
+export function computeNoFuzzy(items) {
+  const keys = [...new Set(items.map((i) => squash(i.ans)))];
   const byLen = new Map();
   for (const k of keys) {
     if (!byLen.has(k.length)) byLen.set(k.length, []);
@@ -339,14 +352,109 @@ function computeNoFuzzy(items) {
   }
   const flagged = new Set();
   for (const k of keys) {
+    if (k.length < FUZZY_MIN_LEN) continue;
     for (const L of [k.length - 1, k.length, k.length + 1]) {
       for (const other of byLen.get(L) || []) {
         if (other === k) continue;
-        if (editDistance(k, other, 1) <= 1) { flagged.add(k); flagged.add(other); }
+        if (editDistance(k, other, 1) <= 1) { flagged.add(k); break; }
       }
+      if (flagged.has(k)) break;
     }
   }
   return [...flagged].sort();
+}
+
+/**
+ * squash 雙胞胎裁決清單：**去空白後同字、字面相異**的答案鍵（ANTICOLD ⇄ ANTI COLD）。
+ *
+ * 這類鍵不能放著不管：`judge()` 的 squashed 分支會讓兩者互相判對，
+ * 而 `nameCollides()` 對去空白相等回 false（D13 交由 H1），H1 卻比的是字面——
+ * 兩邊都以為對方會處理。因此**未裁決即中止發布**，由人逐組判斷：
+ *
+ * - `same`：同一個名字（通用名／描述性名稱，只差連字號或空白）→ 全部改寫為 `canonical`
+ * - `distinct`：剛好撞字的不同產品 → 答案鍵不動，兩者都停用去空白比對與容錯
+ *
+ * 判準：**中文品牌名不同的自創品名視為不同產品**；通用名（INN）與描述性名稱
+ * （感冒膠囊、止咳錠）本來就跨廠共用一個答案鍵（既有的 ANTICOLD 已涵蓋三家），
+ * 連字號不構成區別。`basis` 裡的成分與含量引自 TFDA 欄位（英文／中文品名），
+ * 標「推論」者是品名未載明、由慣例推得。
+ *
+ * 新的雙胞胎進來時管線會中止並列出——在這裡加一筆裁決，不要繞過。
+ */
+export const SQUASH_VERDICTS = Object.freeze([
+  {
+    variants: ['ANTICOLD', 'ANTI COLD'], verdict: 'same', canonical: 'ANTICOLD',
+    basis: '描述性名稱「感冒膠囊」。ANTICOLD 已跨井田／大豐／派頓三家，成大 ANTI-COLD 只差連字號',
+  },
+  {
+    variants: ['ANTICOUGH', 'ANTI COUGH'], verdict: 'same', canonical: 'ANTICOUGH',
+    basis: '描述性名稱「止咳／治咳」。ANTICOUGH 已跨三家（含 eprazinone 50mg），ANTI-COUGH 治咳錠只差連字號',
+  },
+  {
+    variants: ['METHYLTESTOSTERONE', 'METHYL TESTOSTERONE'], verdict: 'same', canonical: 'METHYLTESTOSTERONE',
+    basis: '通用名（INN）methyltestosterone，單一成分；強生／光南／明大與瑞士只差空白',
+  },
+  {
+    variants: ['SUMIN', 'SU MIN'], verdict: 'distinct',
+    basis: '不同產品：井田「適敏」錠 2mg = dexchlorpheniramine（品名載明）；大豐「抒敏」膜衣錠 60mg'
+      + '（成分品名未載明，推論為 fexofenadine）。中文品牌名不同',
+  },
+  {
+    variants: ['UCLOR', 'U CLOR'], verdict: 'distinct',
+    basis: '不同廠的自創品牌：「優克樂」膠囊 vs 優良「優可黴素」膠囊。成分含量相同（cefaclor 250mg，品名載明），'
+      + '但中文品牌名不同，依判準視為不同產品——若改判 same 須人工確認',
+  },
+]);
+
+/**
+ * 套用 `SQUASH_VERDICTS`。**就地改寫** `items[].ans`（僅 `same` 的變體）。
+ *
+ * 放在 Q5 之後：合併若早於 Q5，原本因「同外觀、答案鍵不同」被整組排除的群組會改判存活，
+ * 題庫成員就變了——那是另一個決定，不是這張表的職責。目前的位置只改名、不改成員。
+ *
+ * @returns {{merged: number, noSquash: string[]}} 改寫筆數；`distinct` 的 squash 鍵（已排序）
+ */
+export function resolveSquashTwins(items, verdicts = SQUASH_VERDICTS) {
+  const byKey = new Map();
+  for (const v of verdicts) {
+    const ok = Array.isArray(v.variants) && v.variants.length >= 2
+      && new Set(v.variants).size === v.variants.length
+      && v.variants.every((a) => squash(a) === squash(v.variants[0]))
+      && (v.verdict === 'distinct' || (v.verdict === 'same' && v.variants.includes(v.canonical)));
+    if (!ok) die(`SQUASH_VERDICTS 有不合法的裁決：${JSON.stringify(v)}`);
+    const k = squash(v.variants[0]);
+    if (byKey.has(k)) die(`SQUASH_VERDICTS 對 ${k} 有兩筆裁決`);
+    byKey.set(k, v);
+  }
+
+  const groups = new Map();
+  for (const a of new Set(items.map((i) => i.ans))) {
+    const k = squash(a);
+    if (!groups.has(k)) groups.set(k, new Set());
+    groups.get(k).add(a);
+  }
+  const unreviewed = [];
+  const rename = new Map();
+  const noSquash = [];
+  for (const [k, set] of groups) {
+    if (set.size < 2) continue;
+    const v = byKey.get(k);
+    const vs = [...set].sort();
+    if (!v || !vs.every((a) => v.variants.includes(a))) { unreviewed.push(vs); continue; }
+    if (v.verdict === 'same') for (const a of vs) { if (a !== v.canonical) rename.set(a, v.canonical); }
+    else noSquash.push(k);
+  }
+  if (unreviewed.length) {
+    die(`${unreviewed.length} 組去空白後同字的相異答案鍵未經裁決：`
+      + unreviewed.map((vs) => vs.join(' ⇄ ')).join('；')
+      + '。\n  judge 會讓它們互相判為正確。請在 build-pool.mjs 的 SQUASH_VERDICTS 判定 same／distinct 後再發布。');
+  }
+  let merged = 0;
+  for (const it of items) {
+    const to = rename.get(it.ans);
+    if (to) { it.ans = to; merged++; }
+  }
+  return { merged, noSquash: noSquash.sort() };
 }
 
 // ── 主流程 ────────────────────────────────────────────────────────────
@@ -379,8 +487,12 @@ async function main() {
   for (const [k, v] of Object.entries(stages)) console.log(`      ${k.padEnd(16)} ${v.toLocaleString()}`);
   console.log(`      （Q5 排除 ${ambiguousGroups} 個外觀不可區分群組）`);
 
-  console.log('[6/9] 計算容錯停用清單');
-  const noFuzzy = computeNoFuzzy(items);
+  console.log('[6/9] 裁決 squash 雙胞胎，計算容錯停用清單');
+  const { merged, noSquash } = resolveSquashTwins(items);
+  console.log(`      squash 雙胞胎：合併 ${merged} 筆為同一答案鍵；${noSquash.length} 組相異產品停用去空白比對`
+    + (noSquash.length ? `（${noSquash.join(', ')}）` : ''));
+  // 相異產品的雙胞胎去空白後編輯距離為 0，容錯一併停用（judge 已不讓它落到容錯分支，這是第二道）
+  const noFuzzy = [...new Set([...computeNoFuzzy(items), ...noSquash])].sort();
   console.log(`      ${noFuzzy.length} 個答案鍵停用容錯（與他鍵編輯距離 ≤1，開容錯會誤判為對）`);
 
   console.log('[7/9] 斷言資產鍵唯一');
@@ -433,6 +545,8 @@ async function main() {
       stages,
       // 去空白形式；判定時若答案鍵在此清單內則停用編輯距離容錯（規格 6.2）
       no_fuzzy: noFuzzy,
+      // 去空白後同字的相異產品（SQUASH_VERDICTS 的 distinct）；判定時只接受正規化後完全相符
+      no_squash: noSquash,
     },
     items,
   };
