@@ -422,6 +422,10 @@ export function l2Key(it) {
   return `${shapeKey(it)}#${it.color.join('|')}#${squash(it.mark1 || '')}#${squash(it.mark2 || '')}`;
 }
 
+/** 正解答案鍵全部紀錄的 L2key（含題目那一筆）。L2 誘答一律不得落在其中（M2） */
+const forbiddenL2Keys = (correct, index) =>
+  new Set((index.byAns.get(correct.ans) ?? [correct]).map(l2Key));
+
 /** 該級每題需要幾個誘答（L2 多備 2 個供資源失敗時替換） */
 const needDistractors = (level) =>
   level === Level.L2 ? DISTRACTOR_COUNT : CHOICE_COUNT - 1;
@@ -445,10 +449,14 @@ function candidateOk(candAns, correct, index, level) {
  * 的外觀需要匹配。用答案鍵層級的聯集來篩 L2 會錯得很離譜。
  *
  * 每個答案鍵只取一筆代表紀錄（H1 要求答案鍵互異）。
+ *
+ * **L2key 要避開的是正解答案鍵的全部紀錄，不只題目這一筆**（M2）：
+ * 同名藥常有多家廠牌，誘答照片若與「正解藥名的另一筆紀錄」同 L2key，
+ * 那張照片本身就是正解藥名的合理外觀——四張圖裡有兩張都對，題目不可解。
  */
 function l2Candidates(correct, index, relaxColor) {
   const ck = correct.color.join('|');
-  const correctKey = l2Key(correct);
+  const forbidden = forbiddenL2Keys(correct, index);
   const seen = new Set();
   const out = [];
   for (const rec of index.byShape.get(shapeKey(correct)) || []) {
@@ -456,7 +464,7 @@ function l2Candidates(correct, index, relaxColor) {
     const sameColor = rec.color.join('|') === ck;
     // 放寬第 1 階只放寬顏色；形狀相同與 L2key 相異永不放寬（規格 §4.3）
     if (!sameColor && !(relaxColor && rec.color.some((c) => correct.color.includes(c)))) continue;
-    if (l2Key(rec) === correctKey) continue;
+    if (forbidden.has(l2Key(rec))) continue;
     if (nameCollides(rec.ans, correct.ans)) continue;
     seen.add(rec.ans);
     out.push(rec);
@@ -735,6 +743,15 @@ export function validateQuizInvariants(questions, { level, index } = {}) {
     if (spares.length > maxSpares) bad.push(`[D15] ${at}：備援 ${spares.length} 個超過上限 ${maxSpares}`);
 
     const all = [...opts, ...spares];
+    // M2：誘答與備援不得與正解答案鍵的任一筆紀錄同 L2key（不只題目這一筆）
+    if (lvl === Level.L2) {
+      const forbidden = forbiddenL2Keys(q.item, index);
+      for (const r of all) {
+        if (r && r !== q.item && r.ans !== q.item.ans && forbidden.has(l2Key(r))) {
+          bad.push(`[D12] ${at}：誘答 ${r.ans} 與正解答案鍵 ${q.item.ans} 的紀錄 L2key 相同`);
+        }
+      }
+    }
     const ids = new Set();
     for (const r of all) {
       // I3：每個選項／備援都必須**是題庫裡的那一筆紀錄本身**。

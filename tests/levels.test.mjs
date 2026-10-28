@@ -642,6 +642,12 @@ describe('A9 全題庫掃描 L2', () => {
       // L2key 兩兩相異（含備援）
       const keys = all.map(l2Key);
       assert.equal(new Set(keys).size, keys.length, `L2key 重複：${it.ans}`);
+      // M2：誘答不得與正解答案鍵的**任一筆**紀錄同 L2key（不只題目這一筆）
+      const forbidden = new Set(index().byAns.get(it.ans).map(l2Key));
+      for (const o of all) {
+        if (o !== it) assert.ok(!forbidden.has(l2Key(o)),
+          `${it.ans}（${it.id}）的誘答 ${o.ans} 與正解答案鍵另一筆紀錄同 L2key ${l2Key(o)}`);
+      }
       n++;
     }
     assert.ok(n > 3000, `掃描筆數 ${n} 過少`);
@@ -655,6 +661,66 @@ describe('A9 全題庫掃描 L2', () => {
       const c = buildChoices(it, index(), { level: Level.L2, rng, excludeAns: new Set() });
       assert.equal(c.spares.length, 2);
     }
+  });
+});
+
+// ══ M2 — 誘答不得與正解答案鍵的其他紀錄同外觀 ═══════════════════════════
+// 同一答案鍵常有多家廠牌／多筆紀錄。L2 以題目那一筆比 L2key，漏掉了同名的其他紀錄：
+// 誘答照片若與「正解藥名的另一筆紀錄」同形同色同刻字，那張照片本身就是正解藥名的合理外觀，
+// 題目變成不可解（實測真實題庫 42 個答案鍵曝險，seed 4242 下 2 題實際命中）。
+describe('M2 L2 誘答排除正解答案鍵全部紀錄的 L2key', () => {
+  const R = (ans, mark1, id = `${ans}-${mark1}`) =>
+    ({ id, ans, shape: ['圓形'], color: ['白'], mark1, mark2: null, img: `${id}.webp` });
+  const X1 = R('ZYXWARE', 'X1');
+  const X2 = R('ZYXWARE', 'X2');
+  const TRAP = R('TRAPDOOR', 'X2');           // 與 X2 同 L2key，與題目 X1 不同
+  const fill = ['ALFATIN', 'BRAVOZOL', 'CHARLIDINE', 'DELTAMOX', 'ECHOPRIL', 'FOXTROLOL']
+    .map((a, i) => R(a, `F${i}`));
+  const items = [X1, X2, TRAP, ...fill];
+
+  test('前提：fixture 名稱兩兩不碰撞，TRAP 只因 L2key 被排除', () => {
+    for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) {
+      if (items[i].ans !== items[j].ans) assert.ok(!nameCollides(items[i].ans, items[j].ans));
+    }
+    assert.equal(l2Key(TRAP), l2Key(X2));
+    assert.notEqual(l2Key(TRAP), l2Key(X1));
+  });
+
+  test('buildChoices：正解為 X1 時，TRAP 不得出現在選項或備援（200 個 seed）', () => {
+    const idx = buildIndex(items);
+    const hit = [];
+    for (let seed = 1; seed <= 200; seed++) {
+      const c = buildChoices(X1, idx, { level: Level.L2, rng: makeRng(seed), excludeAns: new Set() });
+      if ([...c.options, ...c.spares].includes(TRAP)) hit.push(seed);
+    }
+    assert.deepEqual(hit, [], `TRAP 被選為誘答的 seed：${hit.slice(0, 10)}`);
+  });
+
+  test('validateQuizInvariants 抓得到這種誘答（手工組出違規題）', () => {
+    const idx = buildIndex(items);
+    const q = newQuestion(X1, {
+      token: 1, level: Level.L2, chance: CHANCE.FOUR,
+      options: [X1, TRAP, fill[0], fill[1]], answerIdx: 0, spares: [fill[2], fill[3]],
+    });
+    const bad = validateQuizInvariants([q], { level: Level.L2, index: idx });
+    assert.ok(bad.some((m) => m.startsWith('[D12]') && m.includes('TRAPDOOR')),
+      `未抓到：${JSON.stringify(bad)}`);
+    // 備援同樣要驗：換入備援後會變成選項
+    const q2 = newQuestion(X1, {
+      token: 1, level: Level.L2, chance: CHANCE.FOUR,
+      options: [X1, fill[0], fill[1], fill[2]], answerIdx: 0, spares: [TRAP, fill[3]],
+    });
+    assert.ok(validateQuizInvariants([q2], { level: Level.L2, index: idx })
+      .some((m) => m.startsWith('[D12]') && m.includes('TRAPDOOR')), '備援內的違規未被抓到');
+  });
+
+  test('〔反向〕合法題卷不誤報', () => {
+    const idx = buildIndex(items);
+    const q = newQuestion(X1, {
+      token: 1, level: Level.L2, chance: CHANCE.FOUR,
+      options: [X1, fill[0], fill[1], fill[2]], answerIdx: 0, spares: [fill[3], fill[4]],
+    });
+    assert.deepEqual(validateQuizInvariants([q], { level: Level.L2, index: idx }), []);
   });
 });
 
