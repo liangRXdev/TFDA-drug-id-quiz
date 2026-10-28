@@ -270,6 +270,7 @@
    "SULIMEN",
    "SULIMON",
    "SULPIN",
+   "SUMIN",
    "SURING",
    "SUTENT",
    "SUTOLIN",
@@ -299,6 +300,7 @@
    "TRANEXAMIN",
    "TRANEXMIN",
    "TRIDINE",
+   "UCLOR",
    "ULICIN",
    "ULSATE",
    "ULSAWE",
@@ -320,6 +322,10 @@
    "ZOLNOX",
    "ZOLPIDEM",
    "ZOPIDEM"
+  ],
+  "no_squash": [
+   "SUMIN",
+   "UCLOR"
   ]
  },
  "items": [
@@ -6711,7 +6717,7 @@
   },
   {
    "id": "內衛藥製字第014268號",
-   "ans": "METHYL TESTOSTERONE",
+   "ans": "METHYLTESTOSTERONE",
    "full": "METHYL TESTOSTERONE CAPSULES \"SWISS\"",
    "zh": "\"瑞士\"甲基睪丸素膠囊",
    "img": "img/78821dc2f7c13177.webp",
@@ -70491,7 +70497,7 @@
   },
   {
    "id": "衛署藥製字第011317號",
-   "ans": "ANTI COUGH",
+   "ans": "ANTICOUGH",
    "full": "ANTI-COUGH TABLETS",
    "zh": "治咳錠",
    "img": "img/b66455189f1d92d0.webp",
@@ -72771,7 +72777,7 @@
   },
   {
    "id": "衛署藥製字第043264號",
-   "ans": "ANTI COLD",
+   "ans": "ANTICOLD",
    "full": "\"CHEN TA\" ANTI-COLD CAPSULES",
    "zh": "〝成大〞感冒膠囊",
    "img": "img/89aa8784d83649c3.webp",

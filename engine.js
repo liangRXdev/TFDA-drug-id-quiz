@@ -101,7 +101,10 @@ export function editDistance(a, b, max = 1) {
  *
  * @param {string} input      使用者原始輸入
  * @param {string} answerKey  題目答案鍵（已正規化）
- * @param {{noFuzzy?: boolean}} [opts] noFuzzy 為 true 時停用容錯（規格 6.2 碰撞處理）
+ * @param {{noFuzzy?: boolean, noSquash?: boolean}} [opts]
+ *        noFuzzy 為 true 時停用容錯（規格 6.2 碰撞處理）；
+ *        noSquash 為 true 時停用去空白比對——題庫內有去空白同字的**相異產品**
+ *        （SUMIN 適敏 ⇄ SU-MIN 抒敏），只接受正規化後完全相符
  * @returns {{correct: boolean, reason: string}}
  *          reason: empty | exact | squashed | fuzzy | wrong
  */
@@ -113,7 +116,8 @@ export function judge(input, answerKey, opts = {}) {
 
   const a = squash(norm);
   const b = squash(answerKey);
-  if (a === b) return { correct: true, reason: 'squashed' };
+  // 去空白相等時直接定案，不落到容錯分支：相等即編輯距離 0，落下去等於繞過 noSquash
+  if (a === b) return opts.noSquash ? { correct: false, reason: 'wrong' } : { correct: true, reason: 'squashed' };
 
   if (!opts.noFuzzy && b.length >= FUZZY_MIN_LEN && editDistance(a, b, 1) <= 1) {
     return { correct: true, reason: 'fuzzy' };

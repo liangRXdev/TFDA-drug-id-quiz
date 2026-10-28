@@ -72,6 +72,7 @@ const show = (el, on = true) => el.classList.toggle('hidden', !on);
 const state = {
   pool: null,
   noFuzzy: new Set(),
+  noSquash: new Set(),
   /**
    * **目前出題的品項集合**。通用版＝全庫；院內版＝命中子集（D36）。
    *
@@ -208,6 +209,7 @@ async function loadPool() {
   state.pool = data;
   state.keyCount = 0;
   state.noFuzzy = new Set(data.meta.no_fuzzy || []);
+  state.noSquash = new Set(data.meta.no_squash || []);
   state.items = data.items;
   state.index = buildIndex(data.items);
 
@@ -1808,7 +1810,8 @@ function submit() {
   if (q.state === QState.LOCKED || q.state === QState.VOID) return;
 
   const raw = $('qInput').value;
-  const r = judge(raw, q.item.ans, { noFuzzy: state.noFuzzy.has(squash(q.item.ans)) });
+  const key = squash(q.item.ans);
+  const r = judge(raw, q.item.ans, { noFuzzy: state.noFuzzy.has(key), noSquash: state.noSquash.has(key) });
   if (r.reason === 'empty') {
     $('qInput').focus();
     return;                       // 空輸入不改變狀態，不算答錯（規格 6.1）

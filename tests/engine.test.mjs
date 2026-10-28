@@ -18,6 +18,7 @@ import {
   QState, transition, newQuestion, scoreQuiz,
   FUZZY_MIN_LEN, HINTED_MARK, displayZh,
 } from '../engine.js';
+import { SQUASH_VERDICTS } from '../tools/build-pool.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const readJson = (p) => JSON.parse(fs.readFileSync(path.join(ROOT, p), 'utf8'));
@@ -94,6 +95,23 @@ describe('A3 — 作答判定', () => {
   test('noFuzzy 旗標可對個別答案鍵停用容錯', () => {
     assert.equal(judge('PROPRANOLOJ', 'PROPRANOLOL').correct, true);
     assert.equal(judge('PROPRANOLOJ', 'PROPRANOLOL', { noFuzzy: true }).correct, false);
+  });
+
+  test('noSquash 旗標停用去空白比對：只有正規化後完全相符才算對（M1）', () => {
+    // SUMIN（適敏）與 SU-MIN（抒敏）是不同產品，去空白後同字——
+    // 走 squashed 分支會把「打成另一顆藥的名字」判為正確
+    assert.equal(judge('SU MIN', 'SUMIN').correct, true, '前提：未加旗標時 squashed 分支會接受');
+    assert.equal(judge('SU MIN', 'SUMIN', { noSquash: true }).correct, false);
+    assert.equal(judge('SUMIN', 'SU MIN', { noSquash: true }).correct, false);
+    // 正規化後完全相符者照樣接受：大小寫、連字號、劑型字詞都不影響
+    assert.equal(judge('sumin tablets', 'SUMIN', { noSquash: true }).correct, true);
+    assert.equal(judge('Su-min', 'SU MIN', { noSquash: true }).correct, true);
+  });
+
+  test('noSquash 不得被容錯分支繞過（去空白相等＝編輯距離 0）', () => {
+    // 〔堵〕只跳過 squashed 分支、讓它落到 fuzzy：長度 ≥6 且未列 noFuzzy 時照樣判對
+    assert.equal(judge('PROPRA NOLOL', 'PROPRANOLOL', { noSquash: true }).correct, false);
+    assert.equal(judge('PROPRA NOLOL', 'PROPRANOLOL', { noSquash: true, noFuzzy: false }).reason, 'wrong');
   });
 
   test('空輸入與純空白回報 empty，不算答錯的一種', () => {
@@ -209,6 +227,45 @@ describe('A4 — 跨答案鍵誤接受', () => {
     assert.equal(falseAccepts.length, 0,
       `${falseAccepts.length} 組誤接受：\n` +
         falseAccepts.slice(0, 20).map(([b, a]) => `  正解 ${b} 卻接受了 ${a}`).join('\n'));
+  });
+
+  /** 題庫內去空白相等、字面相異的答案鍵群組（squash 雙胞胎） */
+  const squashTwins = () => {
+    const bySq = new Map();
+    for (const a of new Set(POOL.items.map((i) => i.ans))) {
+      const k = squash(a);
+      if (!bySq.has(k)) bySq.set(k, new Set());
+      bySq.get(k).add(a);
+    }
+    return [...bySq].filter(([, s]) => s.size > 1).map(([k, s]) => [k, [...s].sort()]);
+  };
+
+  test('M1 題庫內 squash 相等的相異 ans 必須在裁決清單內', () => {
+    // 〔堵〕新的 squash 雙胞胎進來而沒人裁決：judge 的 squashed 分支會讓兩者互相判對
+    const verdictOf = new Map(SQUASH_VERDICTS.map((v) => [squash(v.variants[0]), v]));
+    const unreviewed = squashTwins().filter(([k, vs]) =>
+      !verdictOf.has(k) || !vs.every((a) => verdictOf.get(k).variants.includes(a)));
+    assert.deepEqual(unreviewed, [], '未裁決的 squash 雙胞胎（請在 build-pool 的 SQUASH_VERDICTS 裁決）');
+    // 裁決為同一藥品者應已合併，題庫內不得再並存
+    const sameLeft = squashTwins().filter(([k]) => verdictOf.get(k)?.verdict === 'same');
+    assert.deepEqual(sameLeft, [], '裁決為同一藥品卻未合併');
+  });
+
+  test('★ M1 squash 雙胞胎套用 app 的判定選項後互不接受', () => {
+    assert.ok(POOL?.meta?.no_fuzzy);
+    const nf = new Set(POOL.meta.no_fuzzy);
+    const ns = new Set(POOL.meta.no_squash ?? []);
+    const twins = squashTwins();
+    assert.ok(twins.length > 0, '題庫已無 squash 雙胞胎，此條請改用合成案例');
+    const falseAccepts = [];
+    for (const [k, vs] of twins) {
+      assert.ok(nf.has(k), `${k} 為相異產品的 squash 雙胞胎，必須在 no_fuzzy`);
+      assert.ok(ns.has(k), `${k} 為相異產品的 squash 雙胞胎，必須在 no_squash`);
+      for (const b of vs) for (const a of vs) {
+        if (a !== b && judge(a, b, { noFuzzy: nf.has(k), noSquash: ns.has(k) }).correct) falseAccepts.push([b, a]);
+      }
+    }
+    assert.deepEqual(falseAccepts, [], '正解 / 誤接受的輸入');
   });
 
   test('停用清單不影響非碰撞藥名的容錯', () => {

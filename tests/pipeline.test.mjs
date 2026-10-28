@@ -23,6 +23,7 @@ import { pathToFileURL } from 'node:url';
 import { ROOT } from './_ui-harness.mjs';
 import {
   dosDateToISO, carryHashes, isSha256, validatePair, computeNoFuzzy,
+  resolveSquashTwins, SQUASH_VERDICTS,
 } from '../tools/build-pool.mjs';
 import { PREFIX_TABLE } from '../formulary.js';
 
@@ -204,6 +205,61 @@ describe('H1 computeNoFuzzy：短鄰居也必須被比對', () => {
 
   test('沒有鄰居的長鍵維持容錯', () => {
     assert.deepEqual(computeNoFuzzy(items('PROPRANOLOL', 'ISOPTIN', 'ABC')), []);
+  });
+});
+
+// ══ M1 squash 雙胞胎（去空白後同字的相異答案鍵）═══════════════════════
+
+describe('M1 resolveSquashTwins：未裁決即中止，裁決後合併或停用去空白比對', () => {
+  const recs = (...ans) => ans.map((a, i) => ({ id: `id${i}`, ans: a }));
+  const V = [
+    { variants: ['FOOBAR', 'FOO BAR'], verdict: 'same', canonical: 'FOOBAR', basis: 't' },
+    { variants: ['QUXZ', 'QU XZ'], verdict: 'distinct', basis: 't' },
+  ];
+
+  test('未列在裁決清單的 squash 雙胞胎 → 中止並列出', () => {
+    // 〔堵〕judge 的 squashed 分支會讓 ZETA MAX 與 ZETAMAX 互相判對——未經人工判斷不可發布
+    assert.throws(() => resolveSquashTwins(recs('ZETAMAX', 'ZETA MAX'), V), /ZETAMAX.*ZETA MAX|ZETA MAX.*ZETAMAX/);
+  });
+
+  test('清單只裁決過部分變體時，新出現的第三個變體也要中止', () => {
+    assert.throws(() => resolveSquashTwins(recs('FOOBAR', 'FOO BAR', 'FO OBAR'), V), /FO OBAR/);
+  });
+
+  test('same → 全部改寫為 canonical，回報改寫筆數', () => {
+    const items = recs('FOOBAR', 'FOO BAR', 'FOO BAR', 'OTHER');
+    const r = resolveSquashTwins(items, V);
+    assert.deepEqual(items.map((i) => i.ans), ['FOOBAR', 'FOOBAR', 'FOOBAR', 'OTHER']);
+    assert.equal(r.merged, 2);
+    assert.deepEqual(r.noSquash, []);
+  });
+
+  test('distinct → 答案鍵不動，squash 鍵進 noSquash', () => {
+    const items = recs('QUXZ', 'QU XZ');
+    const r = resolveSquashTwins(items, V);
+    assert.deepEqual(items.map((i) => i.ans), ['QUXZ', 'QU XZ']);
+    assert.deepEqual(r.noSquash, ['QUXZ']);
+  });
+
+  test('沒有雙胞胎時不動任何東西；清單中不在題庫的裁決不影響結果', () => {
+    const items = recs('ALPHA', 'BRAVO', 'FOOBAR');
+    assert.deepEqual(resolveSquashTwins(items, V), { merged: 0, noSquash: [] });
+    assert.deepEqual(items.map((i) => i.ans), ['ALPHA', 'BRAVO', 'FOOBAR']);
+  });
+
+  test('裁決清單本身不合法 → 中止（canonical 不在變體內、變體去空白不相等、verdict 拼錯）', () => {
+    const bad = [
+      [{ variants: ['FOOBAR', 'FOO BAR'], verdict: 'same', canonical: 'FOO-BAR' }],
+      [{ variants: ['FOOBAR', 'FOO BAZ'], verdict: 'distinct' }],
+      [{ variants: ['FOOBAR', 'FOO BAR'], verdict: 'merge', canonical: 'FOOBAR' }],
+      [{ variants: ['FOOBAR'], verdict: 'distinct' }],
+    ];
+    for (const v of bad) assert.throws(() => resolveSquashTwins(recs('ALPHA'), v), `應拒絕 ${JSON.stringify(v)}`);
+  });
+
+  test('正式裁決清單本身合法（每筆都有判斷依據）', () => {
+    assert.doesNotThrow(() => resolveSquashTwins([], SQUASH_VERDICTS));
+    for (const v of SQUASH_VERDICTS) assert.ok(v.basis?.length > 10, `${v.variants} 缺判斷依據`);
   });
 });
 
@@ -398,6 +454,38 @@ describe('TG-1 source_version 真的寫進產物（端到端）', () => {
     assert.deepEqual(a, b, '同一份來源建出不同產物 → meta 含執行時間或有其他非決定性');
     const timeish = Object.keys(a.meta).filter((k) => /time|generated|updated_at/i.test(k));
     assert.deepEqual(timeish, [], `meta 含執行時間欄位：${timeish.join(', ')}`);
+  });
+});
+
+describe('M1 squash 雙胞胎：端到端（真的跑 build-pool）', () => {
+  const rowsWith = (names) => {
+    const rows = sourceRows({ keep: 2, filler: 5200 });
+    names.forEach((name, i) => rows.push({
+      許可證字號: `衛部藥製字第${String(800001 + i).padStart(6, '0')}號`,
+      英文品名: name, 中文品名: `雙胞胎 ${i}`,
+      外觀圖檔連結: `https://example.invalid/t${i}.jpg`,
+      形狀: '圓形', 顏色: '白色', 刻痕: '無', 標註一: `TW${i}`, 標註二: '', 外觀尺寸: `${10 + i}mm`,
+    }));
+    return rows;
+  };
+
+  test('未裁決的 squash 雙胞胎 → exit 1，產物不寫出', () => {
+    const { error, poolRaw } = runPair(zipOf(rowsWith(['ZETAMAX TABLETS', 'ZETA-MAX TABLETS'])));
+    assert.ok(error, '未裁決的 squash 雙胞胎卻發布了');
+    assert.match(error, /ZETAMAX/);
+    assert.equal(poolRaw, null);
+  });
+
+  test('裁決為同一藥品 → 合併；相異產品 → 進 no_squash 與 no_fuzzy', () => {
+    const { pool, error } = runPair(zipOf(rowsWith([
+      'ANTI-COLD CAPSULES', 'ANTICOLD CAPSULES', 'SUMIN TABLETS 2MG', '"T.F." Su-min F.C. Tablets 60mg',
+    ])));
+    assert.equal(error, null, error);
+    const ans = new Set(pool.items.map((i) => i.ans));
+    assert.ok(ans.has('ANTICOLD') && !ans.has('ANTI COLD'), `應合併為 ANTICOLD：${[...ans]}`);
+    assert.ok(ans.has('SUMIN') && ans.has('SU MIN'), '相異產品不得合併');
+    assert.deepEqual(pool.meta.no_squash, ['SUMIN']);
+    assert.ok(pool.meta.no_fuzzy.includes('SUMIN'));
   });
 });
 

@@ -21,6 +21,7 @@ import {
   l2Key, strictlyEligibleL2, pickEliminated, replaceOption,
   drawSpareQuestion, seenAnsKeys, validateQuizInvariants,
 } from '../engine.js';
+import { SQUASH_VERDICTS } from '../tools/build-pool.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const POOL_PATH = path.join(ROOT, 'data/pool.json');
@@ -432,9 +433,17 @@ describe('A16 計分與亂猜基線', () => {
 describe('A17 normalize 未漂移', () => {
   test('normalize(item.full) === item.ans 對全題庫成立（F5）', () => {
     need();
+    // M1：唯一的例外是 SQUASH_VERDICTS 明列為「同一藥品」的變體，改寫成 canonical。
+    // 這不是放寬比對：期望值仍是 normalize(full) 的**確定性函數**（查一張封閉的表），
+    // 且表內每一對都必須去空白相等——normalize 漂移照樣會讓這裡轉紅
+    const alias = new Map();
+    for (const v of SQUASH_VERDICTS) {
+      if (v.verdict === 'same') for (const a of v.variants) alias.set(a, v.canonical);
+    }
     const bad = [];
     for (const it of ITEMS) {
-      if (normalize(it.full) !== it.ans) {
+      const n = normalize(it.full);
+      if ((alias.get(n) ?? n) !== it.ans) {
         bad.push({ full: it.full, ans: it.ans, got: normalize(it.full) });
         if (bad.length >= 5) break;
       }
