@@ -25,7 +25,7 @@
  * 「這批沒新增資源所以不用升」的判斷不留給下一個人。
  */
 const PREFIX = 'tfda-drug-id-quiz-';
-const CACHE = `${PREFIX}v8`;
+const CACHE = `${PREFIX}v9`;
 const SHELL = [
   './',
   'index.html',
@@ -74,15 +74,31 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(networkFirst(req));
 });
 
+/**
+ * 導覽請求的快取 key 去掉 query 與 fragment。
+ * 院內清單連結是 `?fx=…`，每份清單都不同——照原樣當 key，每個連結各存一份，
+ * 離線時換一份清單就全部 miss。非導覽請求不動：那裡的 query 是資源版本的一部分。
+ */
+function cacheKey(req) {
+  if (req.mode !== 'navigate') return req;
+  const u = new URL(req.url);
+  u.search = '';
+  u.hash = '';
+  return u.href;
+}
+
 /** 網路優先，失敗才回快取。離線時 shell 開得起來，但題庫仍會失敗 */
 async function networkFirst(req) {
   const cache = await caches.open(CACHE);
+  const key = cacheKey(req);
   try {
-    const res = await fetch(req);
-    if (res && res.ok) cache.put(req, res.clone());
+    // no-cache：HTTP 快取也要重新驗證。少了它，max-age 內拿到的是瀏覽器 HTTP 快取的舊檔，
+    // 「網路優先」名不副實——舊 app.js 配新 pool 會直接撞 schema 檢查
+    const res = await fetch(req, { cache: 'no-cache' });
+    if (res && res.ok) cache.put(key, res.clone());
     return res;
   } catch {
-    const hit = await cache.match(req);
+    const hit = await cache.match(key);
     if (hit) return hit;
     // 導覽請求離線且未快取時，至少回入口頁（scope 內的深連結）
     if (req.mode === 'navigate') {
