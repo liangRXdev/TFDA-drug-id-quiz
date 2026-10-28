@@ -98,3 +98,50 @@ describe('M1 app 對 no_squash 的答案鍵停用去空白比對', () => {
     assert.equal(got.get('SUMIN'), true);
   });
 });
+
+describe('M3 外觀特徵與題庫 meta 一律跳脫後才進 innerHTML', () => {
+  /** 只看會**解析 HTML** 的 sink；`alt`／`textContent` 等純文字 sink 本來就不產生元素 */
+  const HTML_SINKS = new Set(['innerHTML', 'outerHTML', 'insertAdjacentHTML']);
+  const htmlTainted = (needle) =>
+    sinkLog.calls.filter((c) => HTML_SINKS.has(c.sink) && c.value.includes(needle));
+  const EVIL1 = '<img src=x onerror=1>';
+  const EVIL2 = '<svg onload=2>';
+  const EVIL_FILE = '<img src=y onerror=3>.json';
+  const evilPool = () => {
+    const seen = new Set();
+    const picked = [];
+    for (const it of POOL.items) {
+      if (seen.has(it.ans)) continue;
+      seen.add(it.ans);
+      picked.push({ ...it, mark1: EVIL1, mark2: EVIL2, size: '<i>8</i>', shape: ['<b>圓形</b>'] });
+      if (picked.length === 20) break;
+    }
+    return poolOf(picked, { source_file: EVIL_FILE, source: '<u>src</u>' });
+  };
+
+  test('起始頁：source_file／source 不得以原始標籤進入 DOM', async () => {
+    const dom = await boot(evilPool());
+    assert.ok(!dom.hidden('start'), '題庫未載入成功，這條什麼也沒驗到');
+    assert.deepEqual(htmlTainted(EVIL_FILE), [], 'source_file 未跳脫');
+    assert.deepEqual(htmlTainted('<u>src</u>'), [], 'source 未跳脫');
+    assert.match(dom.$('poolInfo').innerHTML, /&lt;img src=y onerror=3&gt;/, '跳脫後的文字仍須顯示');
+  });
+
+  test('作答頁 qFeatures：mark1／mark2／size／shape 不產生元素', async () => {
+    const dom = await boot(evilPool());
+    startL3(dom);
+    const html = dom.$('qFeatures').innerHTML;
+    assert.ok(html.includes('&lt;img src=x onerror=1&gt;'), '標記一應以跳脫後的文字顯示');
+    for (const evil of [EVIL1, EVIL2, '<i>8</i>', '<b>圓形</b>']) {
+      assert.deepEqual(htmlTainted(evil), [], `${evil} 以原始標籤進入 innerHTML`);
+    }
+  });
+
+  test('閃卡 fFeatures：同一個 featureCell，同樣不產生元素', async () => {
+    const dom = await boot(evilPool());
+    dom.$('btnFlash').click();
+    await dom.settle();
+    assert.ok(dom.$('fFeatures').innerHTML.includes('&lt;svg onload=2&gt;'), '閃卡未渲染特徵，這條什麼也沒驗到');
+    for (const evil of [EVIL1, EVIL2]) assert.deepEqual(htmlTainted(evil), []);
+  });
+});

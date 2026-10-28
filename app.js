@@ -757,8 +757,9 @@ function fxMissingSentence() {
 function renderPoolInfo() {
   const m = state.pool?.meta;
   if (!m) return;
-  const src = ` ｜ <b>來源</b> ${m.source}`
-    + (m.source_file ? ` ｜ <b>檔案</b> <span class="num">${m.source_file}</span>` : '');
+  // meta 來自 pool.json，與品項欄位同屬資料——一律跳脫，不因「是我們自己產的」而例外
+  const src = ` ｜ <b>來源</b> ${escapeHtml(m.source)}`
+    + (m.source_file ? ` ｜ <b>檔案</b> <span class="num">${escapeHtml(m.source_file)}</span>` : '');
   // 收合狀態下的一行答案：「我現在用哪個題庫」不該要展開才看得到。
   // 院內版**不在這裡重印 N**——正上方的 `#startFxNote` 已經印了，
   // 同一個數字出現兩次會讓人開始比對兩者是不是同一件事
@@ -1403,11 +1404,15 @@ function startQuiz() {
   renderQuestion();
 }
 
+/**
+ * `val` 是 TFDA 的原始欄位（標註一／二、外觀尺寸…），刻字欄位就是自由文字，
+ * 必須跳脫；`interp` 一併跳脫。`name` 只吃呼叫端的固定字面值。
+ */
 const featureCell = (name, val, interp) => `
   <div class="metric">
     <div class="name">${name}</div>
-    <div class="val">${val || '—'}</div>
-    ${interp ? `<div class="interp muted">${interp}</div>` : ''}
+    <div class="val">${escapeHtml(val || '—')}</div>
+    ${interp ? `<div class="interp muted">${escapeHtml(interp)}</div>` : ''}
   </div>`;
 
 const OPT_KEYS = ['A', 'B', 'C', 'D'];
