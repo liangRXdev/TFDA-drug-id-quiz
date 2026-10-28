@@ -25,7 +25,7 @@
  * 「這批沒新增資源所以不用升」的判斷不留給下一個人。
  */
 const PREFIX = 'tfda-drug-id-quiz-';
-const CACHE = `${PREFIX}v9`;
+const CACHE = `${PREFIX}v10`;
 const SHELL = [
   './',
   'index.html',

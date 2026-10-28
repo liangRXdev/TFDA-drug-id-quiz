@@ -176,7 +176,13 @@ L2key = (形狀集合, 顏色集合, squash(標註一), squash(標註二))
 
 - 比較輸入一律為 `squash(ans)`——即 pool 內既有的答案鍵去除全部空白，**不再做其他處理**
 - 答案鍵已由建置期 `normalize()` 產出（全大寫、無標點），**本次不得為此改動 `normalize()`**
-- **完全相等由 H1 處理，不再計為前綴碰撞**（避免同一件事兩處判定而漂移）
+- **字面完全相等由 H1 處理，不再計為前綴碰撞**（避免同一件事兩處判定而漂移）
+- **〔2026-10 修訂〕squash 後相等、但字面相異者視為名稱碰撞**（`if (x === y) return a !== b`）。
+  原文寫「完全相等由 H1 處理」，指的是 `squash` 後相等——但 H1 比的是答案鍵**字面**，
+  去空白同名的相異答案鍵（`SUMIN` 適敏 ⇄ `SU MIN` 抒敏、`UCLOR` ⇄ `U CLOR`，
+  見 `build-pool.mjs` 的 `SQUASH_VERDICTS` distinct 裁決）於是兩邊都不管，可同題並列
+  （修正前 L2 以 `UCLOR` 為正解，300 seed 中 39 次帶出 `U CLOR`）。
+  `validateQuizInvariants` 另以不經 `nameCollides` 的明列檢查守同一條（H3）
 
 **兩級的威脅路徑不同，理由須分開寫**：
 

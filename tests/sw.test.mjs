@@ -191,8 +191,8 @@ describe('C31 每批交付無條件升 CACHE 版本', () => {
     const mc = /const CACHE = `\$\{PREFIX\}([^`]+)`/.exec(src);
     assert.ok(mp, 'sw.js 必須有 const PREFIX');
     assert.ok(mc, 'sw.js 的 CACHE 必須由 PREFIX 組出（前綴守衛靠這個關聯成立）');
-    assert.equal(mp[1] + mc[1], 'tfda-drug-id-quiz-v9',
-      '本批（2026-10 覆審修正）必須升到 v9');
+    assert.equal(mp[1] + mc[1], 'tfda-drug-id-quiz-v10',
+      '本批（D13 squash 相等視為名稱碰撞）必須升到 v10');
   });
 
   test('〔v4.5〕cache 名稱由 install 實際使用的值取證，不只比對原始碼常數', async () => {
@@ -201,7 +201,7 @@ describe('C31 每批交付無條件升 CACHE 版本', () => {
     let done;
     listeners.install({ waitUntil: (p) => { done = p; } });
     await done;
-    assert.deepEqual(opened, ['tfda-drug-id-quiz-v9'],
+    assert.deepEqual(opened, ['tfda-drug-id-quiz-v10'],
       `install 實際開啟的 cache 名稱是 ${JSON.stringify(opened)}`);
   });
 
