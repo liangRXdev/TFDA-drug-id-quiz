@@ -19,7 +19,7 @@ import {
   Level, CHOICE_COUNT, DISTRACTOR_COUNT, CHANCE, MAX_QUIZ_ATTEMPTS,
   nameCollides, buildIndex, eligibleKeys, buildChoices, drawLeveledQuiz, judgeChoice,
   l2Key, strictlyEligibleL2, pickEliminated, replaceOption,
-  drawSpareQuestion, seenAnsKeys, validateQuizInvariants,
+  drawSpareQuestion, seenAnsKeys, validateQuizInvariants, drawRetryQuiz,
 } from '../engine.js';
 import { SQUASH_VERDICTS } from '../tools/build-pool.mjs';
 
@@ -289,6 +289,161 @@ describe('D13 squash 相等的相異答案鍵視為名稱碰撞', () => {
     // 〔反向〕合法題不誤報
     assert.deepEqual(validateQuizInvariants([mk([CORRECT, TA, fill[0], fill[1]], [fill[2], fill[3]])],
       { level: Level.L2, index: idx }), []);
+  });
+});
+
+// ══ H2（2026-10）— 本卷正解集合以 squash 比對 ══════════════════════════
+// 〔堵〕#28 讓同題內 squash 相等的相異答案鍵視為碰撞，但 H2 的 excludeAns 仍比字面：
+//       第 3 題正解 SUMIN、第 11 題誘答 SU MIN 照樣成立（修正前 3000 卷 L1 1 卷、L2 7 卷）。
+//       使用者剛在第 3 題記住「這顆是 SUMIN」，第 11 題就看到 SU MIN 這個幾乎同字的選項
+describe('H2 本卷正解集合以去空白後的答案鍵比對', () => {
+  // 誘答需與正解外觀可辨（L1 形色不相交、L2 同形同色但刻字相異），兩種 fixture 各一
+  const R = (ans, mark1, shape = ['圓形'], color = ['白']) =>
+    ({ id: `${ans}-${mark1}`, ans, shape, color, mark1, mark2: null, img: `${ans}-${mark1}.webp` });
+  const FILL = ['ALFATIN', 'BRAVOZOL', 'CHARLIDINE', 'DELTAMOX', 'ECHOPRIL'];
+  const fixture = (level, twins) => {
+    const correct = level === Level.L1 ? R('ZYXWARE', 'Z0', ['膠囊'], ['紅']) : R('ZYXWARE', 'Z0');
+    const cand = [...twins, ...FILL].map((a, i) => R(a, `C${i}`));
+    return { correct, cand, idx: buildIndex([correct, ...cand]) };
+  };
+
+  test('前提：fixture 名稱兩兩不碰撞（雙胞胎只因 H2 被排除，不是 D13）', () => {
+    const names = ['ZYXWARE', 'SUMIN', 'UCLOR', ...FILL];
+    for (let i = 0; i < names.length; i++) for (let j = i + 1; j < names.length; j++) {
+      assert.ok(!nameCollides(names[i], names[j]), `${names[i]}／${names[j]}`);
+    }
+  });
+
+  for (const level of [Level.L1, Level.L2]) {
+    for (const [inQuiz, twin] of [['SUMIN', 'SU MIN'], ['SU MIN', 'SUMIN'], ['UCLOR', 'U CLOR'], ['U CLOR', 'UCLOR']]) {
+      test(`buildChoices ${level}：excludeAns 含 ${inQuiz} 時，${twin} 不得為誘答或備援（200 seed）`, () => {
+        const { correct, idx } = fixture(level, [twin]);
+        const hit = [];
+        for (let seed = 1; seed <= 200; seed++) {
+          const c = buildChoices(correct, idx, { level, rng: makeRng(seed), excludeAns: new Set(['ZYXWARE', inQuiz]) });
+          if ([...c.options, ...c.spares].some((r) => r.ans === twin)) hit.push(seed);
+        }
+        assert.deepEqual(hit.slice(0, 10), [], `${twin} 被選入的 seed 共 ${hit.length} 個`);
+      });
+    }
+
+    test(`buildChoices ${level}：字面相同照舊排除；未在 excludeAns 的鍵照常可選（反向）`, () => {
+      const { correct, idx } = fixture(level, ['SUMIN']);
+      let seenSumin = false;
+      for (let seed = 1; seed <= 200; seed++) {
+        const ex = buildChoices(correct, idx, { level, rng: makeRng(seed), excludeAns: new Set(['ZYXWARE', 'SUMIN']) });
+        assert.ok(![...ex.options, ...ex.spares].some((r) => r.ans === 'SUMIN'), '字面相同必須排除');
+        const free = buildChoices(correct, idx, { level, rng: makeRng(seed), excludeAns: new Set(['ZYXWARE']) });
+        if ([...free.options, ...free.spares].some((r) => r.ans === 'SUMIN')) seenSumin = true;
+      }
+      assert.ok(seenSumin, '未在本卷正解集合內的鍵從未被選中 → 上面幾條可能因 fixture 而恆綠');
+    });
+  }
+
+  // validator 的 [H2] 要能獨立於 buildChoices 抓到違規：題卷一律手工組，不經建卷路徑
+  const vq = (item, options, spares, token, level = Level.L1) => newQuestion(item, {
+    token, level, chance: CHANCE.FOUR, options, answerIdx: 0, spares,
+  });
+  const V = (() => {
+    const A = R('SUMIN', 'A1', ['圓形'], ['白']);
+    const B = R('ZYXWARE', 'B1', ['膠囊'], ['紅']);
+    const TW = R('SU MIN', 'T1');
+    const f = FILL.map((a, i) => R(a, `V${i}`));
+    return { A, B, TW, f, idx: buildIndex([A, B, TW, ...f]) };
+  })();
+
+  test('validateQuizInvariants [H2]：他題誘答與本卷正解 squash 相等 → 違規', () => {
+    const { A, B, TW, f, idx } = V;
+    const bad = validateQuizInvariants(
+      [vq(A, [A, f[0], f[1], f[2]], [], 1), vq(B, [B, TW, f[3], f[4]], [], 2)],
+      { level: Level.L1, index: idx });
+    assert.ok(bad.some((m) => m.startsWith('[H2]') && m.includes('SU MIN')), JSON.stringify(bad));
+  });
+
+  test('validateQuizInvariants [H2]：他題備援與本卷正解 squash 相等 → 違規', () => {
+    const { A, B, TW, f, idx } = V;
+    // 備援只有 L2 有（D15），題卷用 L2 組，否則會混進 [D15] 雜訊
+    const bad = validateQuizInvariants(
+      [vq(A, [A, f[0], f[1], f[2]], [f[3]], 1, Level.L2), vq(B, [B, f[4], f[0], f[1]], [TW], 2, Level.L2)],
+      { level: Level.L2, index: idx });
+    assert.ok(bad.some((m) => m.startsWith('[H2]') && m.includes('SU MIN')), JSON.stringify(bad));
+  });
+
+  test('validateQuizInvariants [H2]：字面相同照舊報錯；合法題卷不誤報（反向）', () => {
+    const { A, B, f, idx } = V;
+    const A2 = R('SUMIN', 'A2');                              // 同答案鍵的另一筆紀錄
+    const idx2 = buildIndex([A, A2, B, ...f]);
+    const lit = validateQuizInvariants(
+      [vq(A, [A, f[0], f[1], f[2]], [], 1), vq(B, [B, A2, f[3], f[4]], [], 2)],
+      { level: Level.L1, index: idx2 });
+    assert.ok(lit.some((m) => m.startsWith('[H2]')), JSON.stringify(lit));
+    assert.deepEqual(validateQuizInvariants(
+      [vq(A, [A, f[0], f[1], f[2]], [], 1), vq(B, [B, f[3], f[4], f[0]], [], 2)],
+      { level: Level.L1, index: idx }), []);
+  });
+
+  test('drawSpareQuestion：遞補正解不得是本卷已出現答案鍵的 squash 雙胞胎', () => {
+    // 遞補是 H2 的回溯破壞路徑（A21）：遞補正解若是早先某題誘答的雙胞胎，
+    // 那一題就變成「誘答與本卷正解 squash 相等」。級別用 L3 隔離掉 buildChoices，只驗候選篩選
+    const { A, B, TW, f, idx } = V;
+    const OK = R('OMEGAZINE', 'O1');
+    const idx2 = buildIndex([A, B, TW, OK, ...f]);
+    const qs = [vq(B, [B, A, f[0], f[1]], [], 1)];            // SUMIN 只是誘答
+    for (let seed = 1; seed <= 50; seed++) {
+      const sp = drawSpareQuestion({ index: idx2, level: Level.L3, eligible: new Set(['SU MIN', 'OMEGAZINE']),
+        questions: qs, token: 2, rng: makeRng(seed) });
+      assert.equal(sp?.item.ans, 'OMEGAZINE', `seed ${seed} 遞補抽到 ${sp?.item.ans}`);
+    }
+  });
+
+  test('真實題庫定向：雙胞胎一方為本卷正解時，另一方不得出現在本卷任何題的誘答或備援', () => {
+    need();
+    // 刻意挑「另一方是其候選誘答」的題目當同卷其他題（L2 同形同色、L1 形色不相交），
+    // 否則隨機卷的命中率只有千分之幾，測不出東西（修正前 L1 每方向約 4%、L2 53–94%）
+    const TWINS = [['SUMIN', 'SU MIN'], ['UCLOR', 'U CLOR']];
+    const sig = (r) => `${r.shape.join('|')}#${r.color.join('|')}`;
+    const hits = [];
+    const failures = [];
+    let built = 0;
+    for (const [level, seeds] of [[Level.L1, 60], [Level.L2, 15], [Level.L3, 15]]) {
+      const el = eligibleKeys(index(), level);
+      for (const [a, b] of TWINS) for (const [x, y] of [[a, b], [b, a]]) {
+        if (!el.has(x)) continue;
+        const yr = index().byAns.get(y);
+        const ok = (k) => k !== x && k !== y && el.has(k) && !nameCollides(k, y) && !nameCollides(k, x);
+        let bait;
+        if (level === Level.L1) {
+          const ys = new Set(yr.flatMap((r) => r.shape));
+          const yc = new Set(yr.flatMap((r) => r.color));
+          bait = [...index().byAns].filter(([k, rs]) => ok(k)
+            && rs.every((r) => !r.shape.some((v) => ys.has(v)) && !r.color.some((v) => yc.has(v)))).map(([k]) => k);
+        } else {
+          const want = new Set(yr.map(sig));
+          bait = [...new Set(ITEMS.filter((r) => want.has(sig(r))).map((r) => r.ans))].filter(ok);
+        }
+        assert.ok(bait.length >= 19, `${level} ${x}：可當同卷題目的候選僅 ${bait.length} 個`);
+        for (let seed = 1; seed <= seeds; seed++) {
+          const rng = makeRng(seed);
+          const pool = bait.slice();
+          for (let i = pool.length - 1; i > 0; i--) {
+            const j = Math.floor(rng() * (i + 1));
+            [pool[i], pool[j]] = [pool[j], pool[i]];
+          }
+          let qs;
+          try {
+            qs = drawRetryQuiz(ITEMS, { level, ansKeys: [x, ...pool.slice(0, 19)], rng, index: index(), eligible: el });
+          } catch (e) { failures.push(`${level} ${x} seed ${seed}：${e.code}`); continue; }
+          built++;
+          for (const q of qs) for (const r of [...(q.options || []), ...(q.spares || [])]) {
+            if (r !== q.item && r.ans === y) hits.push(`${level} 正解 ${x}（seed ${seed}）→ 他題含 ${y}`);
+          }
+        }
+      }
+    }
+    // 建卷失敗也算紅：建卷邏輯回歸而 validator 正確時，症狀是 INVARIANT_VIOLATED 而不是命中
+    assert.deepEqual(failures.slice(0, 10), [], `建卷失敗 ${failures.length} 次`);
+    assert.ok(built > 0);
+    assert.deepEqual(hits.slice(0, 10), [], `共 ${hits.length} 次同卷共現`);
   });
 });
 
