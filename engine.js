@@ -553,9 +553,11 @@ export function strictlyEligibleL2(rec, index) {
  * @throws {Error} code = 'NO_DISTRACTORS'
  */
 export function buildChoices(correct, index, { level, rng, excludeAns } = {}) {
-  const exclude = excludeAns || new Set();
+  // H2 以 squash 比對（2026-10）：字面比對會放行本卷正解的去空白雙胞胎——
+  // 第 3 題正解 SUMIN、第 11 題誘答 SU MIN。本題自己的正解仍照舊由字面放行（H1 另管）
+  const exclude = new Set([...(excludeAns || [])].map(squash));
   const need = needDistractors(level);
-  const usable = (rec) => !(exclude.has(rec.ans) && rec.ans !== correct.ans);
+  const usable = (rec) => !(exclude.has(squash(rec.ans)) && rec.ans !== correct.ans);
 
   let picked = null;
   if (level === Level.L2) {
@@ -720,6 +722,7 @@ export function validateQuizInvariants(questions, { level, index } = {}) {
   });
 
   if (lvl === Level.L3) return bad;                      // 無選項，其餘不變量不適用
+  const correctsSq = new Set([...corrects].map(squash));
 
   // 沒有索引就驗不了紀錄身分。此時**判為違規**而非略過：
   // 「少傳一個參數就靜默降級成弱檢查」正是這道防線最容易失效的方式
@@ -769,9 +772,11 @@ export function validateQuizInvariants(questions, { level, index } = {}) {
     for (let a = 0; a < all.length; a++) {
       const x = all[a];
       if (!x?.id) continue;
-      // H2：誘答與備援不得屬於本卷正解集合（本題正解除外）
-      if (x !== q.item && corrects.has(x.ans)) {
-        bad.push(`[H2] ${at}：誘答 ${x.ans} 屬於本卷正解集合`);
+      // H2：誘答與備援不得屬於本卷正解集合（本題正解除外）。
+      // 以 squash 比對（2026-10），且自行由題卷重算集合、不讀建卷用的 excludeAns——
+      // 建卷邏輯回歸時這裡仍抓得到
+      if (x !== q.item && correctsSq.has(squash(x.ans))) {
+        bad.push(`[H2] ${at}：誘答 ${x.ans} 屬於本卷正解集合（去空白比對）`);
       }
       for (let b = a + 1; b < all.length; b++) {
         const y = all[b];
@@ -827,8 +832,9 @@ function assertQuizInvariants(quiz, level, index) {
  * @returns {object|null} 無可用候選時回傳 null（呼叫端應中止本回合）
  */
 export function drawSpareQuestion({ index, level, eligible, questions, token, rng = Math.random }) {
-  const seen = seenAnsKeys(questions);
-  const keys = index.keys.filter((ans) => !seen.has(ans) && (!eligible || eligible.has(ans)));
+  // 以 squash 比對，與 H2 一致：遞補正解若是早先某題誘答的去空白雙胞胎，那一題的 H2 被回溯破壞
+  const seen = new Set([...seenAnsKeys(questions)].map(squash));
+  const keys = index.keys.filter((ans) => !seen.has(squash(ans)) && (!eligible || eligible.has(ans)));
   shuffle(keys, rng);                                    // filter 已複製，未動索引（D20）
 
   for (const ans of keys) {
