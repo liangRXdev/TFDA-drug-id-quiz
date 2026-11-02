@@ -304,8 +304,17 @@ describe('L2 ready-gate 與 C8 特徵遮蔽', () => {
       eligible: eligibleKeys(idx(), Level.L2),
     })[0];
 
+    // 官方品名本身可含劑型（「舒腦膠囊」的「膠囊」同時是 shape 值），而 plan-v3-levels 明定 L2 題幹
+    // 顯示 full + zh——只比對原始 innerHTML 時，抽到這類品名就紅，擋下整批資料更新
+    // （2026-11-01，#30）。先移除品名兩節點再查，品名以外的洩漏仍會轉紅。
+    const escName = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const promptWithoutName = $('qPrompt').innerHTML
+      .replace(`<div class="name">${escName(q.item.full)}</div>`, '')
+      .replace(`<div class="zh">${escName(q.item.zh)}</div>`, '');
+
     const surface = [
-      $('qPrompt').innerHTML,
+      promptWithoutName,
       $('qGridNote').textContent,
       ...dom.cells().map((c) => `${c.innerHTML} ${c.querySelector('img').getAttribute('alt')}`),
     ].join(' ');
